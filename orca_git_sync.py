@@ -5,7 +5,7 @@
 # name = "Git Sync"
 # description = "Sync user presets (printer, filament, process) through a git repo."
 # author = "Daniel Humpf"
-# version = "0.1.0"
+# version = "0.2.0"
 # ///
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Sync OrcaSlicer user presets through git. Pull on start, commit and push on save.
@@ -17,7 +17,9 @@ import datetime
 import json
 import os
 import platform
+import shutil
 import subprocess
+import sys
 import threading
 import urllib.parse
 from dataclasses import dataclass, field
@@ -25,7 +27,7 @@ from pathlib import Path
 
 import orca
 
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 PRESET_DIRS = ("filament", "process", "machine")
 TRACK_REF = "refs/ogs/remote"
 GIT_TIMEOUT = 60
@@ -70,11 +72,36 @@ DEFAULT_CONFIG = {
 }
 
 
-def find_git():
-    for candidate in ("/opt/homebrew/bin/git", "/usr/local/bin/git", "/usr/bin/git"):
-        if os.path.exists(candidate):
+GIT_CANDIDATES = {
+    "darwin": ("/opt/homebrew/bin/git", "/usr/local/bin/git", "/usr/bin/git"),
+    "win32": (r"C:\Program Files\Git\cmd\git.exe", r"C:\Program Files (x86)\Git\cmd\git.exe"),
+}
+LIBSECRET = (
+    "/usr/lib/git-core/git-credential-libsecret",
+    "/usr/libexec/git-core/git-credential-libsecret",
+    "/usr/lib/git/git-credential-libsecret",
+)
+
+
+def find_git(system=None, exists=os.path.exists, which=shutil.which):
+    system = system or sys.platform
+    for candidate in GIT_CANDIDATES.get(system, ("/usr/bin/git", "/usr/local/bin/git")):
+        if exists(candidate):
             return candidate
-    return "git"
+    return which("git") or "git"
+
+
+def credential_helper(system=None, exists=os.path.exists):
+    """The OS credential store git keeps the token in."""
+    system = system or sys.platform
+    if system == "darwin":
+        return "osxkeychain"
+    if system == "win32":
+        return "manager"
+    if any(exists(p) for p in LIBSECRET):
+        return "libsecret"
+    # No keyring helper: memory only, the token is asked again after a logout.
+    return "cache --timeout=2592000"
 
 
 def git_argv(git, name):
@@ -135,7 +162,7 @@ class Syncer:
             "remote.origin.url": self.settings["repo_url"],
             "remote.origin.fetch": f"+refs/heads/{branch}:{TRACK_REF}",
             "remote.origin.push": f"HEAD:refs/heads/{branch}",
-            "credential.helper": "osxkeychain",
+            "credential.helper": credential_helper(),
             "core.hooksPath": str(self.hooks_dir),
             "commit.gpgSign": "false",
             "core.quotePath": "false",
@@ -429,8 +456,8 @@ small { color: GrayText; }
 <form id="f">
 <label><span>Repo URL</span><input name="repo_url" placeholder="https://git.example.com/team/presets.git"></label>
 <label><span>Branch</span><input name="branch" placeholder="main"></label>
-<label><span>Username</span><input name="username"><small>The token goes to the macOS keychain from the Git Sync window, never into this config.</small></label>
-<label><span>Commit author name</span><input name="author_name" placeholder="OrcaSlicer on this Mac"></label>
+<label><span>Username</span><input name="username"><small>The token goes to the system credential store from the Git Sync window, never into this config.</small></label>
+<label><span>Commit author name</span><input name="author_name" placeholder="OrcaSlicer on this computer"></label>
 <label><span>Commit author email</span><input name="author_email"></label>
 <label><span>Preset folder</span><input name="preset_folder" placeholder="auto"><small>Folder name under user/. Empty picks the one Orca loads.</small></label>
 <button type="submit">Save</button>
@@ -455,7 +482,7 @@ input { width: 100%; box-sizing: border-box; padding: 5px; font: inherit; margin
 <button id="sync">Sync now</button>
 <h4>Access token</h4>
 <input id="token" type="password" autocomplete="off" placeholder="Forgejo or GitHub token">
-<button id="save">Save to keychain</button>
+<button id="save">Save token</button>
 <script>
 const $ = id => document.getElementById(id);
 $('sync').onclick = () => { $('status').textContent = 'Syncing'; orca.postMessage({command: 'sync'}); };
@@ -607,7 +634,7 @@ class GitSync(orca.script.ScriptPluginCapabilityBase):
     def store_token(self, token):
         try:
             self.make_syncer().save_token(token)
-            self.post_status("Token saved to the keychain.")
+            self.post_status("Token saved to the system credential store.")
         except Exception as e:
             self.post_status(f"Token not saved: {e}")
 

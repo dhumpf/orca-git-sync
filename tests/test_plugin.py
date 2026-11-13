@@ -180,6 +180,34 @@ class PluginTest(unittest.TestCase):
         with self.assertRaises(ogs.GitError):
             syncer.save_token("tok")
 
+    def test_credential_helper_per_platform(self):
+        _, ogs = load_plugin(self.tmp.name)
+
+        def none(p):
+            return False
+
+        def libsecret(p):
+            return p.endswith("git-credential-libsecret")
+
+        self.assertEqual(ogs.credential_helper("darwin", none), "osxkeychain")
+        self.assertEqual(ogs.credential_helper("win32", none), "manager")
+        self.assertEqual(ogs.credential_helper("linux", libsecret), "libsecret")
+        self.assertTrue(ogs.credential_helper("linux", none).startswith("cache"))
+
+    def test_find_git_per_platform(self):
+        _, ogs = load_plugin(self.tmp.name)
+
+        def only(want):
+            return lambda p: p == want
+
+        mac = "/opt/homebrew/bin/git"
+        self.assertEqual(ogs.find_git("darwin", only(mac), lambda n: None), mac)
+        win = r"C:\Program Files\Git\cmd\git.exe"
+        self.assertEqual(ogs.find_git("win32", only(win), lambda n: None), win)
+        self.assertEqual(ogs.find_git("linux", only("/usr/bin/git"), lambda n: None), "/usr/bin/git")
+        self.assertEqual(ogs.find_git("linux", lambda p: False, lambda n: "/x/bin/git"), "/x/bin/git")
+        self.assertEqual(ogs.find_git("win32", lambda p: False, lambda n: None), "git")
+
     def test_messages_have_no_semicolons_or_em_dashes(self):
         _, ogs = load_plugin(self.tmp.name)
         r = ogs.SyncResult(
