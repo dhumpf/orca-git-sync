@@ -43,6 +43,8 @@ Preset folder auto: Orca keeps presets in `user/<account id>` when you are signe
 
 Each call has a fixed command line, so Orca can grant each one once. Repo URL, branch and author go in through `GIT_CONFIG_*` environment variables, text through stdin.
 
+Git gets a short allowlist from your environment, nothing else: `PATH`, `HOME`, `LANG`, `TMPDIR`, plus what the credential helpers need on Windows (`SYSTEMROOT`, `USERPROFILE`, `APPDATA`, `LOCALAPPDATA`) and Linux (`DBUS_SESSION_BUS_ADDRESS`, `XDG_RUNTIME_DIR`). API keys and tokens in your shell never reach git. That read is why Orca's plugin review lists "Reads environment variables".
+
 | Call | Used for |
 |---|---|
 | `init -q` | first run |

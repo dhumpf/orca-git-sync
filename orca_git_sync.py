@@ -5,7 +5,7 @@
 # name = "Git Sync"
 # description = "Sync user presets (printer, filament, process) through a git repo."
 # author = "Daniel Humpf"
-# version = "0.2.0"
+# version = "0.3.0"
 # ///
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Sync OrcaSlicer user presets through git. Pull on start, commit and push on save.
@@ -27,7 +27,7 @@ from pathlib import Path
 
 import orca
 
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 PRESET_DIRS = ("filament", "process", "machine")
 TRACK_REF = "refs/ogs/remote"
 GIT_TIMEOUT = 60
@@ -80,6 +80,20 @@ LIBSECRET = (
     "/usr/lib/git-core/git-credential-libsecret",
     "/usr/libexec/git-core/git-credential-libsecret",
     "/usr/lib/git/git-credential-libsecret",
+)
+# All git and the credential helpers need. The rest of the user's environment, API keys
+# included, never reaches git.
+GIT_ENV_ALLOWLIST = (
+    "PATH",
+    "HOME",
+    "LANG",
+    "TMPDIR",
+    "SYSTEMROOT",
+    "USERPROFILE",
+    "APPDATA",
+    "LOCALAPPDATA",
+    "DBUS_SESSION_BUS_ADDRESS",
+    "XDG_RUNTIME_DIR",
 )
 
 
@@ -168,7 +182,7 @@ class Syncer:
             "core.quotePath": "false",
             "merge.renames": "false",
         }
-        env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+        env = {k: os.environ[k] for k in GIT_ENV_ALLOWLIST if k in os.environ}
         name = self.settings["author_name"] or f"OrcaSlicer on {self.host}"
         email = self.settings["author_email"] or "orca-git-sync@localhost"
         env.update(
