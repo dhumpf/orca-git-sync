@@ -21,6 +21,21 @@ Only `*.json` presets in `filament/`, `process/` and `machine/` are synced. Orca
 
 The git repo itself lives in the plugin's storage folder, not in Orca's preset folder, so nothing is added there.
 
+## What this plugin accesses
+
+Orca's plugin review lists what a plugin can touch. This is what Git Sync does with each of those, read from the code.
+
+| What | Why | How to limit or change it |
+|---|---|---|
+| Runs git as a separate process, only the fixed commands under [Git calls](#git-calls). Each call stops after 60 s | all the sync work is git. It is looked up in the usual install places (Homebrew or Xcode on macOS, Git for Windows) and otherwise on your `PATH` | Orca asks once to allow these commands. Without that the plugin cannot sync |
+| Reads a short list of environment variables and hands only those to git | git and the credential helpers need them, see [Git calls](#git-calls). Nothing else from your shell is passed on | nothing to set. Git still reads your own global git config through `HOME`, except hooks and commit signing, which are switched off |
+| Reads the computer name (the part before the first dot) | the default commit author is `OrcaSlicer on <name>`, and every commit subject reads `presets: N change(s) on <name>`, so you can tell which computer saved what | set Commit author name and email in the config. The name in the commit subject stays. Both go into the repo history |
+| Reads and writes your Orca preset folder | commits only `*.json` directly inside `filament/`, `process/` and `machine/`. A pull writes the repo's files into that folder, plus a `(git conflict ...)` copy when both sides changed a preset | pick the folder with Preset folder. Give push access to the repo only to people you trust |
+| Writes its own storage folder | the git repo, the last git output and `sync.log` (one line per sync) live here, so no `.git` folder ends up among your presets | nothing to set. `sync.log` holds the sync summaries and git error messages, no token |
+| Talks to the repo URL you set, nothing else | fetch and push through git, on start, 2 s after a save, on Sync now and on quit. The plugin makes no other network call | the repo URL in the config. A proxy or `insteadOf` rule in your global git config still applies |
+| Saves the token to the system credential store | the token field goes to `git credential approve` on stdin. macOS keychain, Windows Credential Manager, or libsecret on Linux. It is not written to the plugin config, `sync.log` or any other file | use a token that can only read and write the presets repo. Revoke it at your git host, or delete it from the keychain or Credential Manager. Linux without libsecret keeps it in git's memory cache, for up to 30 days or until you log out |
+| Starts background threads | the sync runs beside Orca so saving a preset does not freeze it | Orca asks once together with the git commands |
+
 ## Install
 
 1. Download [`orca_git_sync.py`](https://github.com/dhumpf/orca-git-sync/releases/latest/download/orca_git_sync.py) from the latest release (or `make build` puts it in `dist/`). For a newer version later, download and install it again.
