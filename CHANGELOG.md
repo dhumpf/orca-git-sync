@@ -9,11 +9,12 @@ Sync touches only preset json, and the token goes only to the plugin's credentia
 | | |
 |---|---|
 | Commits | only `*.json` directly inside `filament/`, `process/` and `machine/` are staged, picked by name. A `.gitignore` in the folder or a file the repo already tracks can no longer get anything else committed. `.info` files are never committed or deleted |
-| Pulls | only preset json is written to the preset folder. Other files in the repo stay in git. Extra files an older version checked out are removed from the folder on the next pull that brings changes, unless you edited them |
-| Extra tracked files | files in the repo other than preset json no longer sync. They stay in the repo as they are |
+| Pulls | only preset json is written to the preset folder. Other files in the repo stay in git. Extra files an older version checked out are removed from the folder on the next pull that brings changes, unless you edited them. A merge left open by a crash is finished on the next sync |
+| Extra tracked files | files in the repo other than preset json no longer sync. They stay in the repo as they are. When an unpushed commit from an older version changed one and the repo changed it too, the repo's version wins and nothing is written to the folder |
+| Large syncs | the commit message lists changed paths up to about 12 KB and then counts the rest, so a sync or merge with hundreds of presets no longer fails |
 | Token | credential helpers from your own git config are cleared for the plugin's git calls. A global `store` helper no longer gets a copy. If you relied on your own helper and never saved a token in the Git Sync window, save it there once |
 | Redirects | not followed. A moved or renamed repo, or a URL your host redirects, now fails with a message. Set the final URL, often the one ending in `.git` |
-| Permissions | the `add` and `status` commands changed, so Orca asks once more to allow the git commands |
+| Permissions | the `add` and `status` commands changed and `update-index -z --index-info` is new, so Orca asks once more to allow the git commands |
 
 ## 0.3.1
 

@@ -14,6 +14,7 @@ Status: for OrcaSlicer 2.5 and later (the plugin API is still experimental). Run
 | Run the Git Sync script action, then Sync now | same as start |
 | Both sides changed one preset | your version stays, the other one is saved next to it as `<name> (git conflict <date time>)`. A notification tells you. Pick one and delete the other |
 | One side deleted, the other edited | the edit wins, nothing is lost |
+| Both sides changed a file that is not a preset | the repo's version wins. The file is not written to your preset folder |
 
 It never force-pushes. A rejected push fetches, merges and tries once more.
 
@@ -30,7 +31,7 @@ Orca's plugin review lists what a plugin can touch. This is what Git Sync does w
 | Runs git as a separate process, only the fixed commands under [Git calls](#git-calls). Each call stops after 60 s | all the sync work is git. It is looked up in the usual install places (Homebrew or Xcode on macOS, Git for Windows) and otherwise on your `PATH` | Orca asks once to allow these commands. Without that the plugin cannot sync |
 | Reads a short list of environment variables and hands only those to git | git and the credential helpers need them, see [Git calls](#git-calls). Nothing else from your shell is passed on | nothing to set. Git still reads your own global git config through `HOME`, except hooks, commit signing, credential helpers and HTTP redirects, which are switched off for these calls |
 | Reads the computer name (the part before the first dot) | the default commit author is `OrcaSlicer on <name>`, and every commit subject reads `presets: N change(s) on <name>`, so you can tell which computer saved what | set Commit author name and email in the config. The name in the commit subject stays. Both go into the repo history |
-| Reads and writes your Orca preset folder | commits only `*.json` directly inside `filament/`, `process/` and `machine/`. A pull writes, updates or deletes only those files, plus a `(git conflict ...)` copy when both sides changed a preset. Any other file in the repo stays in git and is not written to the folder. Such files an older version wrote there are removed on the next pull that brings changes, unless you edited them | pick the folder with Preset folder. Give push access to the repo only to people you trust |
+| Reads and writes your Orca preset folder | commits only `*.json` directly inside `filament/`, `process/` and `machine/`. A pull writes, updates or deletes only those files, plus a `(git conflict ...)` copy when both sides changed a preset. Any other file in the repo stays in git and is not written to the folder. When a merge conflicts on such a file, the repo's version wins in git. Such files an older version wrote there are removed on the next pull that brings changes, unless you edited them | pick the folder with Preset folder. Give push access to the repo only to people you trust |
 | Writes its own storage folder | the git repo, the last git output and `sync.log` (one line per sync) live here, so no `.git` folder ends up among your presets | nothing to set. `sync.log` holds the sync summaries and git error messages, no token |
 | Talks to the repo URL you set | fetch and push through git, on start, 2 s after a save, on Sync now and on quit. HTTP redirects are not followed, so git never goes on to another address. The plugin makes no other network call | the repo URL in the config. If it redirects, sync stops with a message to set the final URL. A proxy or `insteadOf` rule in your global git config still applies |
 | Saves the token to the system credential store | the token field goes to `git credential approve` on stdin. macOS keychain, Windows Credential Manager, or libsecret on Linux. Credential helpers from your own git config are cleared for every plugin git call, so only that store gets the token. The plugin does not write it to its config, `sync.log` or any other file | use a token that can only read and write the presets repo. Revoke it at your git host, or delete it from the keychain or Credential Manager. Linux without libsecret keeps it in git's memory cache, for up to 30 days or until you log out |
@@ -71,6 +72,7 @@ Git gets a short allowlist from your environment, nothing else: `PATH`, `HOME`, 
 | `rev-parse -q --verify HEAD` | is there history yet |
 | `fetch -q origin`, `for-each-ref ... refs/ogs/remote` | pull |
 | `merge-tree --write-tree ...`, `merge ... -X ours refs/ogs/remote`, `cat-file --batch` | merge and keep both versions |
+| `update-index -z --index-info` | a merge conflict on a file that is not a preset: put the repo's version in git without writing the folder |
 | `push -q origin` | push, never forced |
 | `credential approve` | save the token to the credential store |
 

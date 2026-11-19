@@ -59,10 +59,15 @@ GIT_ARGS = {
     "remote_ref": ["for-each-ref", "--format=%(objectname)", TRACK_REF],
     "merge_tree": ["merge-tree", "--write-tree", "-z", "--allow-unrelated-histories", "HEAD", TRACK_REF],
     "merge": ["merge", "-q", "--no-edit", "--allow-unrelated-histories", "-X", "ours", TRACK_REF],
+    "index": ["update-index", "-z", "--index-info"],
     "cat": ["cat-file", "--batch"],
     "push": ["push", "-q", "origin"],
     "credential": ["credential", "approve"],
 }
+
+# Commit messages stay well under the 16 KB stdin cap of run().
+MSG_BYTES = 12288
+LINE_BYTES = 1024
 
 # Redirects are not followed, so a token never goes to a host the user did not set.
 REDIRECT_HINT_ON = "returned error: 30"
@@ -128,6 +133,26 @@ def is_preset(path):
     """Only `*.json` directly inside a preset dir is ever staged or written."""
     parts = path.split("/")
     return len(parts) == 2 and parts[0] in PRESET_DIRS and parts[1].endswith(".json")
+
+
+def clip(text, limit):
+    """At most `limit` UTF-8 bytes, cut on a character boundary."""
+    return text.encode()[:limit].decode(errors="ignore")
+
+
+def commit_message(title, lines):
+    """Title plus as many lines as fit in MSG_BYTES, then a count of the rest."""
+    out = clip(title, LINE_BYTES).encode() + b"\n\n"
+    for i, line in enumerate(lines):
+        item = (clip(line, LINE_BYTES) + "\n").encode()
+        if len(out) + len(item) > MSG_BYTES - 64:
+            return out + f"- and {len(lines) - i} more\n".encode()
+        out += item
+    return out
+
+
+def glob_escape(text):
+    return "".join(f"[{c}]" if c in "*?[" else c for c in text)
 
 
 def git_argv(git, name):
@@ -276,26 +301,30 @@ class Syncer:
         out = self.run("status").stdout.decode()
         return [e[3:] for e in out.split("\0") if len(e) > 3 and is_preset(e[3:])]
 
-    def stage(self):
+    def run_batched(self, name, items):
         batch = b""
-        for path in self.changes():
-            item = f":(literal){path}\0".encode()
+        for item in items:
             if len(batch) + len(item) > 16384:
-                self.run("add", stdin=batch)
+                self.run(name, stdin=batch)
                 batch = b""
             batch += item
         if batch:
-            self.run("add", stdin=batch)
+            self.run(name, stdin=batch)
+
+    def stage(self):
+        self.run_batched("add", [f":(literal){path}\0".encode() for path in self.changes()])
+
+    def staged(self):
+        """True when the index differs from HEAD on any path."""
+        out = self.run("status").stdout.decode()
+        return any(len(e) > 3 and e[0] not in " ?" for e in out.split("\0"))
 
     def commit_local(self):
         self.stage()
         changed = self.changes()
         if changed:
-            body = "\n".join(f"- {p}" for p in sorted(changed)[:100])
-            if len(changed) > 100:
-                body += f"\n- and {len(changed) - 100} more"
             title = f"presets: {len(changed)} change(s) on {self.host}"
-            self.run("commit", stdin=f"{title}\n\n{body}\n".encode())
+            self.run("commit", stdin=commit_message(title, [f"- {p}" for p in sorted(changed)]))
         return changed
 
     def fetch(self):
@@ -311,7 +340,7 @@ class Syncer:
         return bool(self.run("remote_ref").stdout.strip())
 
     def conflicts(self):
-        """{path: {stage: oid}} for paths a merge with the remote conflicts on."""
+        """{path: {stage: (mode, oid)}} for paths a merge with the remote conflicts on."""
         proc = self.run("merge_tree", check=False)
         if proc.returncode == 0:
             return {}
@@ -322,8 +351,8 @@ class Syncer:
             if not entry:
                 break
             meta, _, path = entry.partition("\t")
-            _mode, oid, stage = meta.split(" ")
-            found.setdefault(path, {})[int(stage)] = oid
+            mode, oid, stage = meta.split(" ")
+            found.setdefault(path, {})[int(stage)] = (mode, oid)
         return found
 
     def blobs(self, oids):
@@ -345,6 +374,10 @@ class Syncer:
         tmp = target.with_name(target.name + ".ogs-tmp")
         tmp.write_bytes(data)
         os.replace(tmp, target)
+
+    def has_copy(self, rel):
+        p = Path(rel)
+        return any((self.work_tree / p.parent).glob(f"{glob_escape(p.stem)} (git conflict *){p.suffix}"))
 
     def write_copy(self, rel, data):
         p = Path(rel)
@@ -372,36 +405,60 @@ class Syncer:
                 out[f"{d}/{f.name}"] = f.read_bytes()
         return out
 
-    def merge_remote(self):
-        """Merge the fetched branch. Returns (changed paths, [(path, copy)])."""
+    def take_remote(self, found):
+        """Conflicts outside the preset files: the remote's version goes in the index, nothing to the folder."""
+        items, lines = [], []
+        for path, stages in sorted(found.items()):
+            if is_preset(path):
+                continue
+            zero = "0" * len(next(iter(stages.values()))[1])
+            items.append(f"0 {zero}\t{path}\0".encode())
+            if 3 in stages:
+                mode, oid = stages[3]
+                items.append(f"{mode} {oid}\t{path}\0".encode())
+            lines.append(f"- {path}: remote version, not a preset")
+        self.run_batched("index", items)
+        return lines
+
+    def merge_remote(self, resume=False):
+        """Merge the fetched branch, or finish a merge left open. Returns (changed paths, [(path, copy)])."""
         before = self.snapshot()
         resolved = []
         if not self.has_head():
             self.run("merge")
         else:
             found = self.conflicts()
-            # -X ours never leaves conflict markers in a preset file. Orca
-            # deletes a preset file it cannot parse.
-            self.run("merge", check=False)
+            outside = {p: (self.work_tree / p).exists() for p in found if not is_preset(p)}
+            if not resume:
+                # -X ours never leaves conflict markers in a preset file. Orca
+                # deletes a preset file it cannot parse.
+                proc = self.run("merge", check=False)
+                if proc.returncode != 0 and not (self.git_dir / "MERGE_HEAD").exists():
+                    raise GitError(f"git merge: {proc.stderr.decode(errors='replace').strip()}")
+            lines = []
             if found:
-                oids = sorted({oid for stages in found.values() for oid in stages.values()})
+                oids = sorted({oid for stages in found.values() for _mode, oid in stages.values()})
                 data = self.blobs(oids)
                 for path, stages in sorted(found.items()):
                     if not is_preset(path):
                         continue
-                    ours, theirs = stages.get(2), stages.get(3)
+                    ours, theirs = (stages.get(n, (None, None))[1] for n in (2, 3))
                     if ours and theirs:
                         self.write(path, data[ours])
-                        if data[ours] != data[theirs]:
+                        if data[ours] != data[theirs] and not (resume and self.has_copy(path)):
                             resolved.append((path, self.write_copy(path, data[theirs])))
                     else:
                         self.write(path, data[ours or theirs])
                         resolved.append((path, None))
                 lines = [f"- {p}: remote version in {c}" if c else f"- {p}: kept, delete undone" for p, c in resolved]
+                lines += self.take_remote(found)
+                for path, existed in outside.items():
+                    if not existed and (self.work_tree / path).is_file():
+                        (self.work_tree / path).unlink()
+            if found or resume:
                 self.stage()
-                if (self.git_dir / "MERGE_HEAD").exists() or self.changes():
-                    msg = "presets: merge, kept both versions\n\n" + "\n".join(lines) + "\n"
-                    self.run("commit", stdin=msg.encode())
+                if (self.git_dir / "MERGE_HEAD").exists() or self.staged():
+                    self.run("commit", stdin=commit_message("presets: merge, kept both versions", lines))
         for d in PRESET_DIRS:
             (self.work_tree / d).mkdir(exist_ok=True)
         after = self.snapshot()
@@ -413,6 +470,8 @@ class Syncer:
             result = SyncResult()
             try:
                 self.ensure_repo()
+                if (self.git_dir / "MERGE_HEAD").exists():
+                    result.pulled, result.conflicts = self.merge_remote(resume=True)
                 result.committed = self.commit_local()
                 if not self.settings["repo_url"]:
                     raise GitError("no repo URL set, open the plugin config")

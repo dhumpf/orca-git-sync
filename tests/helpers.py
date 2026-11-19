@@ -107,3 +107,19 @@ def remote_file(remote, path):
     return subprocess.run(
         ["git", "--git-dir", str(remote), "show", f"main:{path}"], capture_output=True, text=True
     ).stdout
+
+
+def raw_git(mac, *args):
+    """Plain git on a Mac's plugin clone, without the plugin's sparse checkout."""
+    s = mac.syncer
+    env = {**os.environ, "GIT_DIR": str(s.git_dir), "GIT_WORK_TREE": str(mac.presets)}
+    git = ["git", "-c", "user.name=old", "-c", "user.email=old@example.com", "-c", "core.sparseCheckout=false"]
+    return subprocess.run(git + list(args), env=env, check=True, capture_output=True, text=True).stdout
+
+
+def old_clone(mac, remote):
+    """The clone 0.3.1 left behind: every tracked file checked out in the preset folder."""
+    mac.syncer.git_dir.mkdir(parents=True, exist_ok=True)
+    raw_git(mac, "init", "-q")
+    raw_git(mac, "fetch", "-q", str(remote), "+refs/heads/main:refs/ogs/remote")
+    raw_git(mac, "merge", "-q", "refs/ogs/remote")
