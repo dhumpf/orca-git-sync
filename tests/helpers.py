@@ -75,3 +75,51 @@ def remote_log(remote):
 
 def tmpdir():
     return tempfile.TemporaryDirectory(prefix="ogs-test-")
+
+
+def push_files(tmp, remote, files, delete=()):
+    """Commit arbitrary files to the remote's main with plain git, as another tool would."""
+    work = Path(tmp) / "raw-clone"
+    if not work.exists():
+        subprocess.run(["git", "clone", "-q", str(remote), str(work)], check=True, capture_output=True)
+    git = ["git", "-C", str(work), "-c", "user.name=raw", "-c", "user.email=raw@example.com"]
+    subprocess.run(git + ["pull", "-q", "--no-rebase", "origin", "main"], capture_output=True)
+    for rel, text in files.items():
+        (work / rel).parent.mkdir(parents=True, exist_ok=True)
+        (work / rel).write_text(text)
+    for rel in delete:
+        (work / rel).unlink()
+    subprocess.run(git + ["add", "-A", "-f", "."], check=True)
+    subprocess.run(git + ["commit", "-q", "-m", "raw"], check=True)
+    subprocess.run(git + ["push", "-q", "origin", "HEAD:main"], check=True, capture_output=True)
+
+
+def remote_files(remote):
+    out = subprocess.run(
+        ["git", "-c", "core.quotePath=false", "--git-dir", str(remote), "ls-tree", "-r", "--name-only", "main"],
+        capture_output=True,
+        text=True,
+    )
+    return out.stdout.splitlines()
+
+
+def remote_file(remote, path):
+    return subprocess.run(
+        ["git", "--git-dir", str(remote), "show", f"main:{path}"], capture_output=True, text=True
+    ).stdout
+
+
+def raw_git(mac, *args):
+    """Plain git on a Mac's plugin clone, without the plugin's sparse checkout."""
+    s = mac.syncer
+    env = {**os.environ, "GIT_DIR": str(s.git_dir), "GIT_WORK_TREE": str(mac.presets)}
+    git = ["git", "-c", "user.name=old", "-c", "user.email=old@example.com", "-c", "core.sparseCheckout=false"]
+    return subprocess.run(git + list(args), env=env, check=True, capture_output=True, text=True).stdout
+
+
+def old_clone(mac, remote):
+    """The clone 0.3.1 left behind: every tracked file checked out in the preset folder."""
+    mac.syncer.git_dir.mkdir(parents=True, exist_ok=True)
+    raw_git(mac, "init", "-q")
+    raw_git(mac, "fetch", "-q", str(remote), "+refs/heads/main:refs/ogs/remote")
+    raw_git(mac, "merge", "-q", "refs/ogs/remote")

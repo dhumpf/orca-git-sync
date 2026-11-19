@@ -2,6 +2,21 @@
 
 The section for a version becomes its GitHub release notes and its Orca Cloud changelog.
 
+## 0.3.2
+
+Sync touches only preset json, and the token goes only to the plugin's credential store.
+
+| | |
+|---|---|
+| Commits | only `*.json` directly inside `filament/`, `process/` and `machine/` are staged, picked by name. A `.gitignore` in the folder or a file the repo already tracks can no longer get anything else committed. `.info` files are never committed. Links and folders named like a preset are skipped |
+| Pulls | only preset json is written to the preset folder. Other files in the repo stay in git. A link in the repo arrives as a plain file, and a folder named like a preset is not checked out. A submodule named like a preset arrives as an empty folder, which is never read or committed |
+| Open merges | a merge git left open, for example a preset deleted on one side and edited on the other, is finished on the next sync. A preset you saved in between stays yours, and the other version is kept as a copy. A merge git could finish by itself is committed at once and not reopened. If Orca stops before the conflict copy for it is written, the copy is not made later, and the other version stays only in the repo history |
+| Extra tracked files | files in the repo other than preset json no longer sync. They stay in the repo as they are. Ones an older version checked out are removed from the folder on the next pull that brings changes. Ones you or Orca edited, `.info` files included, stay in the folder and no longer stop the sync, unless Orca rewrites one while a pull has it set aside and the repo changed it too. Syncs then stop with git's "local changes would be overwritten" until you remove the leftover `<name>.ogs-aside` copy by hand. Only clones made by 0.3.1 or older have such files. The plugin never stages them or deletes them from the repo. When an unpushed commit from an older version changed one and the repo changed it too, the repo's version wins and nothing is written to the folder. A file you name `<name>.ogs-aside` in the preset folder is renamed back to `<name>` on the next sync, if no `<name>` is there |
+| Large syncs | the commit message lists changed paths up to about 12 KB and then counts the rest, so a normal sync or merge with hundreds of presets no longer fails. The exception is an open merge finished on the next sync with very many long preset names (seen at about 100 presets with 100-character names). That sync fails each time until the open merge is aborted by hand in the plugin's storage folder |
+| Token | credential helpers from your own git config are cleared for the plugin's git calls. A global `store` helper no longer gets a copy. If you relied on your own helper and never saved a token in the Git Sync window, save it there once |
+| Redirects | not followed. A moved or renamed repo, or a URL your host redirects, now fails with a message. Set the final URL, often the one ending in `.git` |
+| Permissions | the `add` and `status` commands changed and `update-index -z --index-info` is new, so Orca asks once more to allow the git commands |
+
 ## 0.3.1
 
 Releases publish themselves.
