@@ -5,7 +5,7 @@
 # name = "Git Sync"
 # description = "Sync user presets (printer, filament, process) through a git repo."
 # author = "Daniel Humpf"
-# version = "0.3.0"
+# version = "0.3.1"
 # ///
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Sync OrcaSlicer user presets through git. Pull on start, commit and push on save.
@@ -27,7 +27,7 @@ from pathlib import Path
 
 import orca
 
-VERSION = "0.3.0"
+VERSION = "0.3.1"
 PRESET_DIRS = ("filament", "process", "machine")
 TRACK_REF = "refs/ogs/remote"
 GIT_TIMEOUT = 60

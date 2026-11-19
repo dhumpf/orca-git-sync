@@ -28,6 +28,10 @@ The git repo itself lives in the plugin's storage folder, not in Orca's preset f
 3. Orca asks once to allow the git commands listed below and to start threads. Allow it.
 4. Needs git. macOS: `/usr/bin/git` from the Xcode command line tools works, Homebrew git is picked up first. Windows: Git for Windows. Linux: the distro package.
 
+Orca Cloud: with an Orca Cloud account you can instead go to Browse plugins, search Git Sync and Subscribe. Updates then come through the Update button in Plugins.
+
+Switching from a local install to Orca Cloud: remove the local copy in Plugins first, then subscribe. The two installs may keep separate plugin storage, so the cloud copy would start with no token, no clone and an empty log, and two copies running at once could both sync the same preset folder.
+
 ## Configure
 
 | Where | What |
@@ -73,6 +77,17 @@ Your global git hooks and commit signing are switched off for these calls.
 ## Develop
 
 `make` lists the targets. `make setup && make test` runs the unit tests and a two-computer simulation against a bare repo, without Orca. `make lint`, `make build`.
+
+## Release
+
+1. Bump `version` in the plugin header and `VERSION`, add a `## x.y.z` section to `CHANGELOG.md`, merge to main.
+2. On an up to date main: `make release TAG=vX.Y.Z && gh release create vX.Y.Z --target main --title vX.Y.Z --notes-file dist/release-notes.md`
+
+`make release` runs locally first and stops before anything is published when the tag is not `vX.Y.Z`, does not match the version in the file, or `CHANGELOG.md` has no section for it. CI runs lint, the tests and the version and changelog checks on every pull request.
+
+Publishing the release starts `publish-orcacloud.yml`. It checks again, attaches `orca_git_sync.py`, the zip and `orca_git_sync_any.py`, and sends the release to Orca Cloud with the release notes as the changelog. A pre-release gets its files but does not go to Orca Cloud.
+
+Promoting that pre-release to a full release later does not send it to Orca Cloud either. GitHub fires `released` then, and the workflow only listens for `published`. To ship that version, bump it and cut a new normal release.
 
 ## Credit and license
 
