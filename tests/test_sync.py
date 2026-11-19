@@ -5,7 +5,7 @@ import subprocess
 import unittest
 
 import fake_orca
-from helpers import Mac, bare_repo, isolate_home, remote_log, tmpdir
+from helpers import Mac, bare_repo, isolate_home, push_files, remote_file, remote_files, remote_log, tmpdir
 
 
 class SyncTest(unittest.TestCase):
@@ -67,6 +67,85 @@ class SyncTest(unittest.TestCase):
         self.assertEqual(r.committed, ["filament/PLA.json"])
         self.b.sync()
         self.assertEqual(self.b.files("filament"), ["PLA.json"])
+
+    def test_gitignore_from_the_remote_cannot_add_other_files(self):
+        self.a.save("filament", "PLA", nozzle_temperature=["205"])
+        self.assertClean(self.a.sync())
+        push_files(self.tmp.name, self.remote, {".gitignore": "!/secret.txt\n!/filament/*\n"})
+        (self.b.presets / "secret.txt").write_text("not for the repo")
+        (self.b.presets / "filament" / "PLA.info").write_text("cloud ids")
+        self.b.save("process", "Fine", layer_height="0.1")
+        self.assertClean(self.b.sync())
+        self.b.save("process", "Fine", layer_height="0.12")
+        self.assertClean(self.b.sync())
+        files = remote_files(self.remote)
+        self.assertNotIn("secret.txt", files)
+        self.assertNotIn("filament/PLA.info", files)
+        self.assertIn("process/Fine.json", files)
+        self.assertFalse((self.b.presets / ".gitignore").exists())
+
+    def test_tracked_info_is_never_committed_deleted_or_pulled(self):
+        self.a.save("filament", "PLA", nozzle_temperature=["205"])
+        self.assertClean(self.a.sync())
+        push_files(self.tmp.name, self.remote, {"filament/PLA.info": "remote ids\n", "notes.txt": "remote\n"})
+        self.assertClean(self.a.sync())
+        self.assertFalse((self.a.presets / "filament" / "PLA.info").exists(), "a lone .info was pulled")
+        self.assertFalse((self.a.presets / "notes.txt").exists())
+        self.b.sync()
+        (self.b.presets / "filament" / "PLA.info").write_text("local ids\n")
+        (self.b.presets / "notes.txt").write_text("local\n")
+        self.b.save("filament", "PLA", nozzle_temperature=["210"])
+        self.assertClean(self.b.sync())
+        (self.b.presets / "filament" / "PLA.info").unlink()
+        (self.b.presets / "notes.txt").unlink()
+        self.b.save("filament", "PLA", nozzle_temperature=["215"])
+        self.assertClean(self.b.sync())
+        self.assertEqual(remote_file(self.remote, "filament/PLA.info"), "remote ids\n")
+        self.assertEqual(remote_file(self.remote, "notes.txt"), "remote\n")
+        self.assertIn('"215"', remote_file(self.remote, "filament/PLA.json"))
+
+    def test_pull_writes_only_preset_json(self):
+        push_files(
+            self.tmp.name,
+            self.remote,
+            {
+                "filament/PLA.json": "{}\n",
+                "filament/sub/deep.json": "{}\n",
+                "filament/run.sh": "x\n",
+                "README.md": "x\n",
+                ".gitignore": "x\n",
+                "other/x.json": "{}\n",
+            },
+        )
+        r = self.a.sync()
+        self.assertClean(r)
+        self.assertEqual(r.pulled, ["filament/PLA.json"])
+        on_disk = sorted(str(p.relative_to(self.a.presets)) for p in self.a.presets.rglob("*") if p.is_file())
+        self.assertEqual(on_disk, ["filament/PLA.json"])
+
+    def test_odd_preset_names_sync_and_delete(self):
+        names = ["-rf", "a b", "Ünïcode PLA", ":(glob)x", "[x]*?", "*"]
+        for n in names:
+            self.a.save("filament", n, nozzle_temperature=["200"])
+        nested = self.a.presets / "filament" / "sub" / "deep.json"
+        nested.parent.mkdir()
+        nested.write_text("{}")
+        self.assertClean(self.a.sync())
+        self.assertEqual(sorted(remote_files(self.remote)), sorted(f"filament/{n}.json" for n in names))
+        for n in ("-rf", "*"):
+            (self.a.presets / "filament" / f"{n}.json").unlink()
+        self.assertClean(self.a.sync())
+        self.assertEqual(sorted(remote_files(self.remote)), sorted(f"filament/{n}.json" for n in names[1:5]))
+        self.assertClean(self.b.sync())
+        self.assertEqual(self.b.files("filament"), sorted(f"{n}.json" for n in names[1:5]))
+
+    def test_many_presets_in_one_sync(self):
+        for i in range(300):
+            self.a.save("process", f"{i:03d} " + "long name " * 8, layer_height="0.2")
+        r = self.a.sync()
+        self.assertClean(r)
+        self.assertEqual(len(r.committed), 300)
+        self.assertEqual(len(remote_files(self.remote)), 300)
 
     def test_conflict_keeps_both_and_never_force_pushes(self):
         self.a.save("filament", "PETG", nozzle_temperature=["240"])

@@ -75,3 +75,35 @@ def remote_log(remote):
 
 def tmpdir():
     return tempfile.TemporaryDirectory(prefix="ogs-test-")
+
+
+def push_files(tmp, remote, files, delete=()):
+    """Commit arbitrary files to the remote's main with plain git, as another tool would."""
+    work = Path(tmp) / "raw-clone"
+    if not work.exists():
+        subprocess.run(["git", "clone", "-q", str(remote), str(work)], check=True, capture_output=True)
+    git = ["git", "-C", str(work), "-c", "user.name=raw", "-c", "user.email=raw@example.com"]
+    subprocess.run(git + ["pull", "-q", "--no-rebase", "origin", "main"], capture_output=True)
+    for rel, text in files.items():
+        (work / rel).parent.mkdir(parents=True, exist_ok=True)
+        (work / rel).write_text(text)
+    for rel in delete:
+        (work / rel).unlink()
+    subprocess.run(git + ["add", "-A", "-f", "."], check=True)
+    subprocess.run(git + ["commit", "-q", "-m", "raw"], check=True)
+    subprocess.run(git + ["push", "-q", "origin", "HEAD:main"], check=True, capture_output=True)
+
+
+def remote_files(remote):
+    out = subprocess.run(
+        ["git", "-c", "core.quotePath=false", "--git-dir", str(remote), "ls-tree", "-r", "--name-only", "main"],
+        capture_output=True,
+        text=True,
+    )
+    return out.stdout.splitlines()
+
+
+def remote_file(remote, path):
+    return subprocess.run(
+        ["git", "--git-dir", str(remote), "show", f"main:{path}"], capture_output=True, text=True
+    ).stdout

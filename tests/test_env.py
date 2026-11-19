@@ -25,6 +25,7 @@ class EnvTest(unittest.TestCase):
         fake_orca.install(self.tmp.name)
         import orca_git_sync
 
+        self.ogs = orca_git_sync
         self.syncer = orca_git_sync.Syncer(self.tmp.name + "/tree", self.tmp.name + "/git", {"repo_url": "x"})
 
     def tearDown(self):
@@ -47,6 +48,17 @@ class EnvTest(unittest.TestCase):
             env = self.syncer.env()
         self.assertNotIn("HOME", env)
         self.assertEqual(env["PATH"], "/usr/bin")
+
+    def test_inherited_credential_helpers_are_cleared_and_redirects_off(self):
+        with mock.patch.dict(os.environ, SHELL, clear=True):
+            env = self.syncer.env()
+        pairs = [
+            (env[f"GIT_CONFIG_KEY_{i}"], env[f"GIT_CONFIG_VALUE_{i}"]) for i in range(int(env["GIT_CONFIG_COUNT"]))
+        ]
+        helpers = [v for k, v in pairs if k == "credential.helper"]
+        self.assertEqual(helpers, ["", self.ogs.credential_helper()])
+        self.assertIn(("http.followRedirects", "false"), pairs)
+        self.assertIn(("core.sparseCheckout", "true"), pairs)
 
 
 if __name__ == "__main__":

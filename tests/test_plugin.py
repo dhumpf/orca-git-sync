@@ -180,6 +180,20 @@ class PluginTest(unittest.TestCase):
         with self.assertRaises(ogs.GitError):
             syncer.save_token("tok")
 
+    def test_inherited_credential_helpers_never_see_the_token(self):
+        home = Path(os.environ["HOME"])
+        (home / ".gitconfig").write_text(
+            '[credential]\n\thelper = store\n[credential "https://git.example.com"]\n\thelper = store\n'
+        )
+        record = Path(self.tmp.name) / "helper-got"
+        _, ogs = load_plugin(self.tmp.name)
+        ogs.credential_helper = lambda: f"!f() {{ cat >> '{record}'; }}; f"
+        cfg = {"repo_url": "https://git.example.com/team/presets.git", "username": "daniel"}
+        syncer = ogs.Syncer(self.tmp.name, Path(self.tmp.name) / "g", cfg, git="git")
+        syncer.save_token("s3cret-token")
+        self.assertIn("password=s3cret-token", record.read_text())
+        self.assertFalse((home / ".git-credentials").exists(), "an inherited helper stored the token")
+
     def test_credential_helper_per_platform(self):
         _, ogs = load_plugin(self.tmp.name)
 

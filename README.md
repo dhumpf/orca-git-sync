@@ -17,7 +17,7 @@ Status: for OrcaSlicer 2.5 and later (the plugin API is still experimental). Run
 
 It never force-pushes. A rejected push fetches, merges and tries once more.
 
-Only `*.json` presets in `filament/`, `process/` and `machine/` are synced. Orca's `.info` files hold per-account cloud ids and are left out on purpose, as are `.bak` copies and everything else in the folder.
+Only `*.json` presets directly inside `filament/`, `process/` and `machine/` are synced, both ways. Orca's `.info` files hold per-account cloud ids and are left out on purpose, as are `.bak` copies and everything else in the folder. Other files in the repo stay in git and are never written to the folder.
 
 The git repo itself lives in the plugin's storage folder, not in Orca's preset folder, so nothing is added there.
 
@@ -28,12 +28,12 @@ Orca's plugin review lists what a plugin can touch. This is what Git Sync does w
 | What | Why | How to limit or change it |
 |---|---|---|
 | Runs git as a separate process, only the fixed commands under [Git calls](#git-calls). Each call stops after 60 s | all the sync work is git. It is looked up in the usual install places (Homebrew or Xcode on macOS, Git for Windows) and otherwise on your `PATH` | Orca asks once to allow these commands. Without that the plugin cannot sync |
-| Reads a short list of environment variables and hands only those to git | git and the credential helpers need them, see [Git calls](#git-calls). Nothing else from your shell is passed on | nothing to set. Git still reads your own global git config through `HOME`, except hooks and commit signing, which are switched off |
+| Reads a short list of environment variables and hands only those to git | git and the credential helpers need them, see [Git calls](#git-calls). Nothing else from your shell is passed on | nothing to set. Git still reads your own global git config through `HOME`, except hooks, commit signing, credential helpers and HTTP redirects, which are switched off for these calls |
 | Reads the computer name (the part before the first dot) | the default commit author is `OrcaSlicer on <name>`, and every commit subject reads `presets: N change(s) on <name>`, so you can tell which computer saved what | set Commit author name and email in the config. The name in the commit subject stays. Both go into the repo history |
-| Reads and writes your Orca preset folder | commits only `*.json` directly inside `filament/`, `process/` and `machine/`. A pull writes the repo's files into that folder, plus a `(git conflict ...)` copy when both sides changed a preset | pick the folder with Preset folder. Give push access to the repo only to people you trust |
+| Reads and writes your Orca preset folder | commits only `*.json` directly inside `filament/`, `process/` and `machine/`. A pull writes, updates or deletes only those files, plus a `(git conflict ...)` copy when both sides changed a preset. Any other file in the repo stays in git and is not written to the folder. Such files an older version wrote there are removed on the next pull that brings changes, unless you edited them | pick the folder with Preset folder. Give push access to the repo only to people you trust |
 | Writes its own storage folder | the git repo, the last git output and `sync.log` (one line per sync) live here, so no `.git` folder ends up among your presets | nothing to set. `sync.log` holds the sync summaries and git error messages, no token |
-| Talks to the repo URL you set, nothing else | fetch and push through git, on start, 2 s after a save, on Sync now and on quit. The plugin makes no other network call | the repo URL in the config. A proxy or `insteadOf` rule in your global git config still applies |
-| Saves the token to the system credential store | the token field goes to `git credential approve` on stdin. macOS keychain, Windows Credential Manager, or libsecret on Linux. It is not written to the plugin config, `sync.log` or any other file | use a token that can only read and write the presets repo. Revoke it at your git host, or delete it from the keychain or Credential Manager. Linux without libsecret keeps it in git's memory cache, for up to 30 days or until you log out |
+| Talks to the repo URL you set | fetch and push through git, on start, 2 s after a save, on Sync now and on quit. HTTP redirects are not followed, so git never goes on to another address. The plugin makes no other network call | the repo URL in the config. If it redirects, sync stops with a message to set the final URL. A proxy or `insteadOf` rule in your global git config still applies |
+| Saves the token to the system credential store | the token field goes to `git credential approve` on stdin. macOS keychain, Windows Credential Manager, or libsecret on Linux. Credential helpers from your own git config are cleared for every plugin git call, so only that store gets the token. The plugin does not write it to its config, `sync.log` or any other file | use a token that can only read and write the presets repo. Revoke it at your git host, or delete it from the keychain or Credential Manager. Linux without libsecret keeps it in git's memory cache, for up to 30 days or until you log out |
 | Starts background threads | the sync runs beside Orca so saving a preset does not freeze it | Orca asks once together with the git commands |
 
 ## Install
@@ -54,7 +54,7 @@ Switching from a local install to Orca Cloud: remove the local copy in Plugins f
 | Plugins > Git Sync > Config | repo URL (https), branch (default `main`), username, commit author, preset folder (empty = auto) |
 | the Git Sync script action | status, Sync now, and the token field |
 
-The token is handed to `git credential approve` and stored by the OS credential store: the macOS keychain (`osxkeychain`), the Windows Credential Manager (`manager`) or libsecret on Linux. It is never written to the plugin config or any file. Use a token that can only read and write the presets repo.
+The token is handed to `git credential approve` and stored by the OS credential store: the macOS keychain (`osxkeychain`), the Windows Credential Manager (`manager`) or libsecret on Linux. The plugin clears the credential helpers from your own git config for its calls, so only that store gets the token, and fetch and push only read it from there. The plugin never writes it to its config or any other file. Use a token that can only read and write the presets repo.
 
 Preset folder auto: Orca keeps presets in `user/<account id>` when you are signed in to a cloud account and in `user/default` when not. The plugin asks Orca which one it loaded, and falls back to the single account folder. With several account folders, set it by hand.
 
@@ -67,14 +67,14 @@ Git gets a short allowlist from your environment, nothing else: `PATH`, `HOME`, 
 | Call | Used for |
 |---|---|
 | `init -q` | first run |
-| `add -A`, `status --porcelain -z`, `commit -q -F -` | local commits |
+| `status --porcelain -z --untracked-files=all`, `add -A --pathspec-from-file=- --pathspec-file-nul`, `commit -q -F -` | local commits. The plugin picks the preset paths from `status` and stages only those, by name on stdin |
 | `rev-parse -q --verify HEAD` | is there history yet |
 | `fetch -q origin`, `for-each-ref ... refs/ogs/remote` | pull |
 | `merge-tree --write-tree ...`, `merge ... -X ours refs/ogs/remote`, `cat-file --batch` | merge and keep both versions |
 | `push -q origin` | push, never forced |
 | `credential approve` | save the token to the credential store |
 
-Your global git hooks and commit signing are switched off for these calls.
+Your global git hooks, commit signing, credential helpers and HTTP redirects are switched off for these calls. A pull uses a sparse checkout, so only the preset json lands in the preset folder.
 
 ## Limits
 
@@ -88,6 +88,7 @@ Your global git hooks and commit signing are switched off for these calls.
 | Orca Cloud preset sync and this plugin can both write the same folder | use one or the other per account |
 | Windows is untested | macOS and Linux are tested, Windows uses Git for Windows and its Credential Manager |
 | Linux without libsecret keeps the token in memory only | install `git-credential-libsecret` to keep it across logins |
+| A repo URL that redirects does not sync | redirects are not followed, so a token never goes to another address. Set the final URL, often the one ending in `.git` |
 
 ## Develop
 

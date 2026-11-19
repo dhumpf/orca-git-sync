@@ -5,7 +5,7 @@
 # name = "Git Sync"
 # description = "Sync user presets (printer, filament, process) through a git repo."
 # author = "Daniel Humpf"
-# version = "0.3.1"
+# version = "0.3.2"
 # ///
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Sync OrcaSlicer user presets through git. Pull on start, commit and push on save.
@@ -27,7 +27,7 @@ from pathlib import Path
 
 import orca
 
-VERSION = "0.3.1"
+VERSION = "0.3.2"
 PRESET_DIRS = ("filament", "process", "machine")
 TRACK_REF = "refs/ogs/remote"
 GIT_TIMEOUT = 60
@@ -44,13 +44,15 @@ EXCLUDE = (
     )
     + "\n"
 )
+# A pull checks out only these paths, the rest of the remote tree stays in git.
+SPARSE = "".join(f"/{d}/*.json\n" for d in PRESET_DIRS)
 
 # Fixed argv per call, so the host grants each one once. URL, branch and
 # identity travel in env (GIT_CONFIG_*), text goes on stdin.
 GIT_ARGS = {
     "init": ["init", "-q"],
-    "add": ["add", "-A"],
-    "status": ["status", "--porcelain", "-z"],
+    "add": ["add", "-A", "--pathspec-from-file=-", "--pathspec-file-nul"],
+    "status": ["status", "--porcelain", "-z", "--untracked-files=all"],
     "commit": ["commit", "-q", "-F", "-"],
     "head": ["rev-parse", "-q", "--verify", "HEAD"],
     "fetch": ["fetch", "-q", "origin"],
@@ -61,6 +63,10 @@ GIT_ARGS = {
     "push": ["push", "-q", "origin"],
     "credential": ["credential", "approve"],
 }
+
+# Redirects are not followed, so a token never goes to a host the user did not set.
+REDIRECT_HINT_ON = "returned error: 30"
+REDIRECT_HINT = "The repo URL redirects. Set the final URL (often ending in .git) in the plugin config"
 
 DEFAULT_CONFIG = {
     "repo_url": "",
@@ -118,6 +124,12 @@ def credential_helper(system=None, exists=os.path.exists):
     return "cache --timeout=2592000"
 
 
+def is_preset(path):
+    """Only `*.json` directly inside a preset dir is ever staged or written."""
+    parts = path.split("/")
+    return len(parts) == 2 and parts[0] in PRESET_DIRS and parts[1].endswith(".json")
+
+
 def git_argv(git, name):
     return [git] + GIT_ARGS[name]
 
@@ -172,16 +184,22 @@ class Syncer:
 
     def env(self):
         branch = self.settings["branch"] or "main"
-        config = {
-            "remote.origin.url": self.settings["repo_url"],
-            "remote.origin.fetch": f"+refs/heads/{branch}:{TRACK_REF}",
-            "remote.origin.push": f"HEAD:refs/heads/{branch}",
-            "credential.helper": credential_helper(),
-            "core.hooksPath": str(self.hooks_dir),
-            "commit.gpgSign": "false",
-            "core.quotePath": "false",
-            "merge.renames": "false",
-        }
+        # An empty credential.helper clears helpers inherited from the user's git config.
+        config = [
+            ("remote.origin.url", self.settings["repo_url"]),
+            ("remote.origin.fetch", f"+refs/heads/{branch}:{TRACK_REF}"),
+            ("remote.origin.push", f"HEAD:refs/heads/{branch}"),
+            ("credential.helper", ""),
+            ("credential.helper", credential_helper()),
+            ("http.followRedirects", "false"),
+            ("core.hooksPath", str(self.hooks_dir)),
+            ("core.sparseCheckout", "true"),
+            ("core.sparseCheckoutCone", "false"),
+            ("commit.gpgSign", "false"),
+            ("core.quotePath", "false"),
+            ("merge.renames", "false"),
+            ("status.renames", "false"),
+        ]
         env = {k: os.environ[k] for k in GIT_ENV_ALLOWLIST if k in os.environ}
         name = self.settings["author_name"] or f"OrcaSlicer on {self.host}"
         email = self.settings["author_email"] or "orca-git-sync@localhost"
@@ -195,7 +213,7 @@ class Syncer:
             GIT_COMMITTER_EMAIL=email,
             GIT_CONFIG_COUNT=str(len(config)),
         )
-        for i, (key, value) in enumerate(config.items()):
+        for i, (key, value) in enumerate(config):
             env[f"GIT_CONFIG_KEY_{i}"] = key
             env[f"GIT_CONFIG_VALUE_{i}"] = value
         return env
@@ -246,19 +264,36 @@ class Syncer:
         exclude.parent.mkdir(parents=True, exist_ok=True)
         if not exclude.exists() or exclude.read_text() != EXCLUDE:
             exclude.write_text(EXCLUDE)
+        sparse = self.git_dir / "info" / "sparse-checkout"
+        if not sparse.exists() or sparse.read_text() != SPARSE:
+            sparse.write_text(SPARSE)
 
     def has_head(self):
         return self.run("head", check=False).returncode == 0
 
     def changes(self):
+        """Preset paths with changes. Other files in the folder are never staged."""
         out = self.run("status").stdout.decode()
-        return [e[3:] for e in out.split("\0") if len(e) > 3]
+        return [e[3:] for e in out.split("\0") if len(e) > 3 and is_preset(e[3:])]
+
+    def stage(self):
+        batch = b""
+        for path in self.changes():
+            item = f":(literal){path}\0".encode()
+            if len(batch) + len(item) > 16384:
+                self.run("add", stdin=batch)
+                batch = b""
+            batch += item
+        if batch:
+            self.run("add", stdin=batch)
 
     def commit_local(self):
-        self.run("add")
+        self.stage()
         changed = self.changes()
         if changed:
-            body = "\n".join(f"- {p}" for p in sorted(changed))
+            body = "\n".join(f"- {p}" for p in sorted(changed)[:100])
+            if len(changed) > 100:
+                body += f"\n- and {len(changed) - 100} more"
             title = f"presets: {len(changed)} change(s) on {self.host}"
             self.run("commit", stdin=f"{title}\n\n{body}\n".encode())
         return changed
@@ -270,6 +305,8 @@ class Syncer:
             err = proc.stderr.decode(errors="replace")
             if "couldn't find remote ref" in err:
                 return False
+            if REDIRECT_HINT_ON in err:
+                raise GitError(f"git fetch: {err.strip()}. {REDIRECT_HINT}")
             raise GitError(f"git fetch: {err.strip()}")
         return bool(self.run("remote_ref").stdout.strip())
 
@@ -350,6 +387,8 @@ class Syncer:
                 oids = sorted({oid for stages in found.values() for oid in stages.values()})
                 data = self.blobs(oids)
                 for path, stages in sorted(found.items()):
+                    if not is_preset(path):
+                        continue
                     ours, theirs = stages.get(2), stages.get(3)
                     if ours and theirs:
                         self.write(path, data[ours])
@@ -359,7 +398,7 @@ class Syncer:
                         self.write(path, data[ours or theirs])
                         resolved.append((path, None))
                 lines = [f"- {p}: remote version in {c}" if c else f"- {p}: kept, delete undone" for p, c in resolved]
-                self.run("add")
+                self.stage()
                 if (self.git_dir / "MERGE_HEAD").exists() or self.changes():
                     msg = "presets: merge, kept both versions\n\n" + "\n".join(lines) + "\n"
                     self.run("commit", stdin=msg.encode())
