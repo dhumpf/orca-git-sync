@@ -124,10 +124,20 @@ jobs:
             echo "No plugin files matched: $PLUGIN_FILES" >&2
             exit 1
           fi
-          status="$(curl -sS -o response.json -w '%{http_code}' \
+          # The reply carries a sharing token and the log is public, so only named fields are printed.
+          reply="$RUNNER_TEMP/orcacloud-reply.json"
+          status="$(curl -sS -o "$reply" -w '%{http_code}' \
             -H "Authorization: Bearer $oidc_token" \
             "${args[@]}" \
             https://api.orcaslicer.com/api/v1/plugin-publish/releases)"
-          cat response.json
-          echo
+          echo "Orca Cloud HTTP $status"
+          if [ "$status" = "201" ]; then
+            fields='def s: if type == "string" or type == "number" then tostring else "?" end;
+              "version \(.version | s), revision \(.revision | s), name \(.name | s)"'
+          else
+            fields='def s: if type == "string" or type == "number" then tostring else "?" end;
+              [.error, .message, .detail] | map(select(. != null) | s) | first // "no error field in the reply"'
+          fi
+          jq -r "$fields" "$reply" 2>/dev/null || echo "Reply has no readable fields"
+          rm -f "$reply"
           [ "$status" = "201" ]
