@@ -10,6 +10,7 @@ Releases publish themselves.
 |---|---|
 | Orca Cloud | each release also goes to the Git Sync listing on Orca Cloud. Subscribed users get it through the Update button in Plugins |
 | Plugin | no change to the sync itself |
+| Moving to Orca Cloud | remove the local install before you subscribe. The two may keep separate plugin storage, so the token, the clone and the log would start fresh, and two copies could sync the same folder |
 
 ## 0.3.0
 

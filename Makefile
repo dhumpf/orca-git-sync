@@ -5,7 +5,6 @@ PYTHON ?= python3
 VENV := .venv
 VERSION := $(shell sed -n 's/^VERSION = "\(.*\)"/\1/p' orca_git_sync.py)
 HEADER_VERSION := $(shell sed -n 's/^. version = "\(.*\)"/\1/p' orca_git_sync.py)
-TAG ?= v$(VERSION)
 DIST := dist
 
 ##@ General
@@ -50,9 +49,10 @@ build: ## Build dist/ with the installable .py and a release zip
 ##@ Release
 
 .PHONY: version-check
-version-check: ## Fail unless the plugin header, VERSION and TAG agree
+version-check: ## Fail unless the plugin header, VERSION and TAG (env, vX.Y.Z) agree
 	@test -n "$(VERSION)" && test "$(VERSION)" = "$(HEADER_VERSION)" || { echo "header $(HEADER_VERSION), VERSION $(VERSION)"; exit 1; }
-	@test "$(TAG)" = "v$(VERSION)" || { echo "tag $(TAG) does not match v$(VERSION)"; exit 1; }
+	@tag="$${TAG-v$(VERSION)}"; [[ "$$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$$ ]] || { echo "TAG must look like v1.2.3" >&2; exit 1; }; \
+	  test "$$tag" = "v$(VERSION)" || { echo "tag $$tag does not match v$(VERSION)" >&2; exit 1; }
 
 .PHONY: release
 release: version-check build ## Build dist/ plus release notes from CHANGELOG.md (CI runs it on a published release)
