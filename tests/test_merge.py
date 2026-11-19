@@ -180,6 +180,160 @@ class MergeTest(unittest.TestCase):
         self.assertEqual(len(self.a.files("filament")), 3, self.a.files("filament"))
         self.assertSettled()
 
+    def test_resume_keeps_a_preset_saved_while_the_merge_was_open(self):
+        self.open_merge()
+        self.a.save("filament", "PETG", nozzle_temperature=["250"])
+        r = self.a.sync()
+        self.assertClean(r)
+        self.assertTrue(r.pushed)
+        self.assertEqual(self.a.read("filament", "PETG")["nozzle_temperature"], ["250"])
+        self.assertIn('"250"', remote_file(self.remote, "filament/PETG.json"))
+        [(path, copy)] = r.conflicts
+        self.assertEqual(path, "filament/PETG.json")
+        self.assertIn('"245"', (self.a.presets / copy).read_text())
+        self.assertIn('"245"', remote_file(self.remote, copy))
+        self.assertSettled()
+
+    def test_resume_after_a_crash_before_the_write_keeps_your_version(self):
+        fill = {f"k{i}": str(i) for i in range(8)}
+        self.local_commit({"filament/PETG.json": preset("filament", "PETG", a="0", **fill, z="0")})
+        push_files(self.tmp.name, self.remote, {"filament/PETG.json": preset("filament", "PETG", a="0", **fill, z="0")})
+        raw_git(self.a, "fetch", "-q", str(self.remote), "+refs/heads/main:refs/ogs/remote")
+        raw_git(self.a, "merge", "-q", "refs/ogs/remote")
+        self.local_commit(
+            {"filament/PLA.info": "local ids\n", "filament/PETG.json": preset("filament", "PETG", a="1", **fill, z="0")}
+        )
+        push_files(
+            self.tmp.name,
+            self.remote,
+            {"filament/PETG.json": preset("filament", "PETG", a="2", **fill, z="9")},
+            delete=["filament/PLA.info"],
+        )
+        s = self.a.syncer
+        s.ensure_repo()
+        s.fetch()
+        s.run("merge", check=False)
+        self.assertTrue((s.git_dir / "MERGE_HEAD").exists())
+        self.assertEqual((self.a.read("filament", "PETG")["a"], self.a.read("filament", "PETG")["z"]), ("1", "9"))
+        r = self.a.sync()
+        self.assertClean(r)
+        self.assertEqual((self.a.read("filament", "PETG")["a"], self.a.read("filament", "PETG")["z"]), ("1", "0"))
+        [(_, copy)] = r.conflicts
+        self.assertIn('"z": "9"', (self.a.presets / copy).read_text())
+        self.assertSettled()
+
+    def test_resume_with_a_preset_deleted_on_one_side(self):
+        base = preset("process", "Fine Draft", layer_height="0.2")
+        self.local_commit({"process/Fine Draft.json": base})
+        push_files(self.tmp.name, self.remote, {"process/Fine Draft.json": base})
+        raw_git(self.a, "fetch", "-q", str(self.remote), "+refs/heads/main:refs/ogs/remote")
+        raw_git(self.a, "merge", "-q", "refs/ogs/remote")
+        self.local_commit({"process/Fine Draft.json": preset("process", "Fine Draft", layer_height="0.24")})
+        push_files(self.tmp.name, self.remote, {}, delete=["process/Fine Draft.json"])
+        s = self.a.syncer
+        s.ensure_repo()
+        s.fetch()
+        s.run("merge", check=False)
+        self.assertTrue((s.git_dir / "MERGE_HEAD").exists())
+        r = self.a.sync()
+        self.assertClean(r)
+        self.assertEqual(r.conflicts, [("process/Fine Draft.json", None)])
+        self.assertEqual(self.a.read("process", "Fine Draft")["layer_height"], "0.24")
+        self.assertIn('"0.24"', remote_file(self.remote, "process/Fine Draft.json"))
+        self.assertSettled()
+
+    def test_resume_writes_a_copy_even_with_an_older_one(self):
+        old = "filament/PETG (git conflict 2026-11-01 1200).json"
+        self.local_commit({old: preset("filament", "PETG (git conflict 2026-11-01 1200)", nozzle_temperature=["220"])})
+        self.open_merge()
+        r = self.a.sync()
+        self.assertClean(r)
+        [(path, copy)] = r.conflicts
+        self.assertNotEqual(copy, old)
+        self.assertIn('"245"', (self.a.presets / copy).read_text())
+        self.assertIn('"220"', (self.a.presets / old).read_text())
+        self.assertIn(copy, remote_files(self.remote))
+        self.assertSettled()
+
+    def assertAsideGone(self):
+        self.assertEqual([p.name for p in self.a.presets.rglob("*.ogs-aside")], [])
+
+    def test_edited_leftover_changed_remotely_does_not_block_sync(self):
+        (self.a.presets / "notes.txt").write_text("my notes\n")
+        self.a.save("process", "Mine", layer_height="0.2")
+        push_files(
+            self.tmp.name,
+            self.remote,
+            {"notes.txt": "remote\n", "filament/PLA.json": preset("filament", "PLA", nozzle_temperature=["205"])},
+        )
+        r = self.a.sync()
+        self.assertClean(r)
+        self.assertTrue(r.pushed)
+        self.assertEqual((self.a.presets / "notes.txt").read_text(), "my notes\n")
+        self.assertEqual(remote_file(self.remote, "notes.txt"), "remote\n")
+        self.assertIn("process/Mine.json", remote_files(self.remote))
+        self.assertEqual(self.a.read("filament", "PLA")["nozzle_temperature"], ["205"])
+        self.assertFalse((self.a.presets / "filament" / "PLA.info").exists(), "clean leftover stayed")
+        self.assertAsideGone()
+        self.assertSettled()
+        self.assertTrue(raw_git(self.a, "ls-files", "-t", "notes.txt").startswith("S "))
+
+        push_files(self.tmp.name, self.remote, {"notes.txt": "remote again\n"})
+        self.assertClean(self.a.sync())
+        self.assertEqual((self.a.presets / "notes.txt").read_text(), "my notes\n")
+        self.assertEqual(remote_file(self.remote, "notes.txt"), "remote again\n")
+        self.assertSettled()
+
+    def test_edited_info_changed_remotely_stays_yours(self):
+        info = self.a.presets / "filament" / "PLA.info"
+        info.write_text("orca ids\n")
+        push_files(self.tmp.name, self.remote, {"filament/PLA.info": "other ids\n"})
+        self.a.save("process", "Mine", layer_height="0.2")
+        r = self.a.sync()
+        self.assertClean(r)
+        self.assertTrue(r.pushed)
+        self.assertEqual(info.read_text(), "orca ids\n")
+        self.assertEqual(remote_file(self.remote, "filament/PLA.info"), "other ids\n")
+        self.assertIn("process/Mine.json", remote_files(self.remote))
+        self.assertAsideGone()
+        self.assertSettled()
+
+    def test_edited_info_deleted_remotely_stays_yours(self):
+        info = self.a.presets / "filament" / "PLA.info"
+        info.write_text("orca ids\n")
+        push_files(
+            self.tmp.name,
+            self.remote,
+            {"process/Fine.json": preset("process", "Fine", layer_height="0.12")},
+            delete=["filament/PLA.info"],
+        )
+        self.a.save("process", "Mine", layer_height="0.2")
+        r = self.a.sync()
+        self.assertClean(r)
+        self.assertTrue(r.pushed)
+        self.assertEqual(info.read_text(), "orca ids\n")
+        self.assertTrue((self.a.presets / "filament" / "PLA.json").exists(), "lone .info")
+        self.assertNotIn("filament/PLA.info", remote_files(self.remote))
+        self.assertIn("process/Mine.json", remote_files(self.remote))
+        self.assertEqual(self.a.read("process", "Fine")["layer_height"], "0.12")
+        self.assertAsideGone()
+        self.assertSettled()
+        self.a.save("process", "Mine", layer_height="0.24")
+        self.assertClean(self.a.sync())
+        self.assertNotIn("filament/PLA.info", remote_files(self.remote))
+        self.assertEqual(info.read_text(), "orca ids\n")
+
+    def test_a_file_set_aside_by_a_crash_is_put_back(self):
+        notes = self.a.presets / "notes.txt"
+        notes.rename(self.a.presets / "notes.txt.ogs-aside")
+        info = self.a.presets / "filament" / "PLA.info"
+        (self.a.presets / "filament" / "PLA.info.ogs-aside").write_text("older ids\n")
+        self.a.syncer.settings["repo_url"] = self.tmp.name + "/gone.git"
+        self.assertTrue(self.a.sync().offline)
+        self.assertEqual(notes.read_text(), "base\n")
+        self.assertEqual(info.read_text(), "base ids\n")
+        self.assertEqual((self.a.presets / "filament" / "PLA.info.ogs-aside").read_text(), "older ids\n")
+
 
 class MessageTest(unittest.TestCase):
     def setUp(self):

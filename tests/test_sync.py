@@ -1,11 +1,13 @@
 """Two simulated Macs syncing through a bare repo, with real git and no Orca."""
 
 import json
+import os
 import subprocess
 import unittest
+from pathlib import Path
 
 import fake_orca
-from helpers import Mac, bare_repo, isolate_home, push_files, remote_file, remote_files, remote_log, tmpdir
+from helpers import Mac, bare_repo, isolate_home, preset, push_files, remote_file, remote_files, remote_log, tmpdir
 
 
 class SyncTest(unittest.TestCase):
@@ -266,6 +268,93 @@ class SyncTest(unittest.TestCase):
         self.a.sync()
         self.assertFalse((self.a.presets / ".git").exists())
         self.assertFalse((self.a.presets / ".gitignore").exists())
+
+    def raw_commit(self, change):
+        """Commit to the remote through plain git, for entries push_files cannot write."""
+        work = Path(self.tmp.name) / "raw-clone"
+        if not work.exists():
+            subprocess.run(["git", "clone", "-q", str(self.remote), str(work)], check=True, capture_output=True)
+        git = ["git", "-C", str(work), "-c", "user.name=raw", "-c", "user.email=raw@example.com"]
+        subprocess.run(git + ["pull", "-q", "--no-rebase", "origin", "main"], capture_output=True)
+        change(work, git)
+        subprocess.run(git + ["commit", "-q", "-m", "raw"], check=True)
+        subprocess.run(git + ["push", "-q", "origin", "HEAD:main"], check=True, capture_output=True)
+
+    def test_folders_named_like_a_preset_never_break_a_sync(self):
+        self.a.save("filament", "PLA", nozzle_temperature=["200"])
+        self.assertClean(self.a.sync())
+        folder = self.a.presets / "filament" / "old.json"
+        folder.mkdir()
+        (folder / "x.json").write_text("{}\n")
+        self.a.save("process", "New", layer_height="0.2")
+        self.assertClean(self.a.sync())
+        self.assertEqual(sorted(remote_files(self.remote)), ["filament/PLA.json", "process/New.json"])
+
+        def gitlink(work, git):
+            entry = "160000," + "1" * 40 + ",filament/sub.json"
+            subprocess.run(git + ["update-index", "--add", "--cacheinfo", entry], check=True)
+
+        self.raw_commit(gitlink)
+        for mac in (self.a, self.b):
+            self.assertClean(mac.sync())
+            sub = mac.presets / "filament" / "sub.json"
+            self.assertFalse(sub.is_file())
+            self.assertEqual(list(sub.iterdir()) if sub.is_dir() else [], [])
+        self.b.save("process", "Other", layer_height="0.3")
+        self.assertClean(self.b.sync())
+        self.assertClean(self.a.sync())
+        self.assertEqual(self.a.read("process", "Other")["layer_height"], "0.3")
+
+    def test_symlinks_are_never_followed_or_staged(self):
+        victim = Path(self.tmp.name) / "victim.txt"
+        victim.write_text("precious\n")
+        self.a.save("filament", "PLA", nozzle_temperature=["200"])
+        self.assertClean(self.a.sync())
+
+        def link(work, git):
+            os.symlink(str(victim), work / "filament" / "Evil.json")
+            subprocess.run(git + ["add", "-A"], check=True)
+
+        self.raw_commit(link)
+        for mac in (self.a, self.b):
+            self.assertClean(mac.sync())
+            pulled = mac.presets / "filament" / "Evil.json"
+            self.assertFalse(pulled.is_symlink(), "a link from the repo was checked out as a link")
+            pulled.write_text(preset("filament", "Evil", nozzle_temperature=["1"]))
+        self.assertEqual(victim.read_text(), "precious\n")
+
+        os.symlink(str(victim), self.a.presets / "process" / "Local.json")
+        r = self.a.sync()
+        self.assertClean(r)
+        self.assertEqual(r.skipped, ["process/Local.json"])
+        self.assertIn("skipped 1", r.summary())
+        self.assertNotIn("process/Local.json", remote_files(self.remote))
+        self.assertEqual(victim.read_text(), "precious\n")
+
+    def test_folder_named_like_a_preset_in_the_repo_is_not_written(self):
+        names = ["PLA [0.4] fast", "Ünïcødé spool", "a b", "*?["]
+        push_files(
+            self.tmp.name,
+            self.remote,
+            {
+                "filament/archive.json/notes.txt": "x\n",
+                "process/old.json/deep.json": "{}\n",
+                **{f"filament/{n}.json": preset("filament", n, nozzle_temperature=["200"]) for n in names},
+            },
+        )
+        r = self.a.sync()
+        self.assertClean(r)
+        self.assertEqual(r.pulled, sorted(f"filament/{n}.json" for n in names))
+        on_disk = sorted(str(p.relative_to(self.a.presets)) for p in self.a.presets.rglob("*") if not p.is_dir())
+        self.assertEqual(on_disk, sorted(f"filament/{n}.json" for n in names))
+        self.assertFalse((self.a.presets / "filament" / "archive.json").exists())
+
+    def test_nested_path_is_never_a_preset(self):
+        import orca_git_sync as ogs
+
+        self.assertTrue(ogs.is_preset("filament/x.json"))
+        for path in ("filament/sub/x.json", "filament/a.json/b.json", "other/x.json", "x.json", "filament/x.info"):
+            self.assertFalse(ogs.is_preset(path), path)
 
 
 if __name__ == "__main__":
