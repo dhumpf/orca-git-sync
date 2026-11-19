@@ -87,6 +87,8 @@ Your global git hooks and commit signing are switched off for these calls.
 
 Publishing the release starts `publish-orcacloud.yml`. It checks again, attaches `orca_git_sync.py`, the zip and `orca_git_sync_any.py`, and sends the release to Orca Cloud with the release notes as the changelog. A pre-release gets its files but does not go to Orca Cloud.
 
+Promoting that pre-release to a full release later does not send it to Orca Cloud either. GitHub fires `released` then, and the workflow only listens for `published`. To ship that version, bump it and cut a new normal release.
+
 ## Credit and license
 
 Built on the OrcaSlicer plugin system. OrcaSlicer is by SoftFever and the OrcaSlicer contributors (github.com/OrcaSlicer/OrcaSlicer), licensed AGPL-3.0.
