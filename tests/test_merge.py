@@ -382,7 +382,7 @@ class MessageTest(unittest.TestCase):
         import orca_git_sync as ogs
 
         name = "process/" + "€" * 4000 + ".json"
-        msg = ogs.commit_message("presets: 1 change(s) on mac", [f"- {name}"])
+        msg = ogs.commit_message("presets: 1 change(s)", [f"- {name}"])
         text = msg.decode("utf-8")
         self.assertLessEqual(len(msg), ogs.MSG_BYTES)
         line = text.splitlines()[2]

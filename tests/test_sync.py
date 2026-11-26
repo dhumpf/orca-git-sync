@@ -237,7 +237,7 @@ class SyncTest(unittest.TestCase):
 
         import orca_git_sync as ogs
 
-        twin = ogs.Syncer(self.a.presets, self.a.syncer.git_dir, self.a.syncer.settings, git="git", host="twin")
+        twin = ogs.Syncer(self.a.presets, self.a.syncer.git_dir, self.a.syncer.settings, git="git")
         self.a.save("filament", "PLA", nozzle_temperature=["205"])
         results = []
         threads = [threading.Thread(target=lambda s=s: results.append(s.sync())) for s in (self.a.syncer, twin) * 3]

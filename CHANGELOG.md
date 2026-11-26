@@ -2,6 +2,20 @@
 
 The section for a version becomes its GitHub release notes and its Orca Cloud changelog.
 
+## 0.4.0
+
+The plugin reads no environment variables and no computer name.
+
+| | |
+|---|---|
+| Settings | repo URL, branch, author and the switches for hooks, signing, credential helpers, redirects and links go into the clone's own config file in the plugin's storage folder, rewritten before each sync. Your global git config is never written |
+| Environment | the plugin reads none and passes git none of its own. Git starts with Orca's environment unchanged, so a `GIT_*` variable set there reaches git. Orca started from the Dock or Start menu has none |
+| Prompts | git runs without a terminal and with `credential.interactive=false`, so it never waits on a password prompt |
+| Author | the default commit author is `OrcaSlicer`, and a commit reads `presets: N change(s)`, without the computer name. Set Commit author name in the config to tell computers apart |
+| Upgrade | an existing clone keeps its history and syncs on as before. The plugin adds its settings below what `git init` wrote. A `git-<folder>-run` folder appears next to the clone |
+| Permissions | `init` is now `init -q --bare`, so Orca asks once more to allow the git commands |
+| No git | a computer without git, or a Mac without the command line tools, gets "git was not found" and what to install instead of an OS error |
+
 ## 0.3.2
 
 Sync touches only preset json, and the token goes only to the plugin's credential store.
