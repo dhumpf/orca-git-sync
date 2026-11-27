@@ -1,7 +1,10 @@
 """No git on the computer reads as a plain message, not an OS error."""
 
+import shutil
+import subprocess
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import fake_orca
 from helpers import isolate_home, tmpdir
@@ -46,6 +49,25 @@ class GitMissingTest(unittest.TestCase):
         with self.assertRaises(self.ogs.GitError) as e:
             self.syncer(str(Path(self.tmp.name) / "no" / "git")).save_token("tok")
         self.assertEqual(str(e.exception), self.ogs.GIT_MISSING)
+
+    def test_windows_missing_binary_has_no_filename(self):
+        # CPython on Windows raises FileNotFoundError from CreateProcess with filename None.
+        s = self.syncer("git")
+        with mock.patch.object(subprocess, "run", side_effect=FileNotFoundError(2, "The system cannot find the file")):
+            self.assertEqual(s.sync().error, self.ogs.GIT_MISSING)
+
+    def test_missing_working_folder_stays_its_own_error(self):
+        s = self.syncer("git")
+        s.ensure_repo()
+
+        def folder_gone(argv, cwd, **kw):
+            shutil.rmtree(cwd)
+            raise FileNotFoundError(2, "The directory name is invalid")
+
+        with mock.patch.object(subprocess, "run", side_effect=folder_gone):
+            r = s.sync()
+        self.assertNotEqual(r.error, self.ogs.GIT_MISSING)
+        self.assertIn("directory name is invalid", r.error)
 
     def test_other_git_errors_keep_their_text(self):
         git = self.fake_git("echo 'fatal: something else' >&2\nexit 128\n")

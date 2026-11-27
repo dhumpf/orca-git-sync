@@ -79,6 +79,9 @@ MANAGED = "# orca-git-sync: settings below are rewritten on every sync\n"
 GIT_MISSING = "git was not found. Install git (or Xcode Command Line Tools on macOS) and restart OrcaSlicer"
 # What the macOS /usr/bin/git stub prints without the command line tools.
 XCRUN_MISSING = b"xcrun: error: invalid active developer path"
+QUIT_HELPER = "!f() { echo quit=1; }; f"
+QUIT_HINT_ON = "told us to quit"
+NO_TOKEN = "no saved token for this repo, save one in the Git Sync window"
 AUTHOR = "OrcaSlicer"
 AUTHOR_EMAIL = "orca-git-sync@localhost"
 
@@ -241,6 +244,9 @@ class Syncer:
             ("remote.origin.push", f"HEAD:refs/heads/{branch}"),
             ("credential.helper", ""),
             ("credential.helper", credential_helper()),
+            # Last helper: stop here when the store has no token. Git before 2.47 ignores
+            # credential.interactive and would run an inherited askpass program.
+            ("credential.helper", QUIT_HELPER),
             ("credential.interactive", "false"),
             ("http.followRedirects", "false"),
             ("commit.gpgSign", "false"),
@@ -293,18 +299,20 @@ class Syncer:
                 os.close(write_fd)
                 write_fd = None
                 # A new session has no terminal, so git cannot stop on a password prompt.
+                cwd = str(self.git_dir if name == "init" else self.run_dir)
                 with open(out_path, "wb") as out, open(err_path, "wb") as err:
                     code = subprocess.run(
                         argv,
                         stdin=read_fd,
                         stdout=out,
                         stderr=err,
-                        cwd=str(self.git_dir if name == "init" else self.run_dir),
+                        cwd=cwd,
                         timeout=GIT_TIMEOUT,
                         start_new_session=True,
                     ).returncode
             except FileNotFoundError as e:
-                if e.filename != argv[0]:
+                # Windows leaves filename empty, so a folder that is there means git is not.
+                if e.filename != argv[0] and not (e.filename is None and os.path.isdir(cwd)):
                     raise
                 raise GitError(GIT_MISSING) from None
             finally:
@@ -382,6 +390,8 @@ class Syncer:
                 return False
             if REDIRECT_HINT_ON in err:
                 raise GitError(f"git fetch: {err.strip()}. {REDIRECT_HINT}")
+            if QUIT_HINT_ON in err:
+                raise GitError(f"git fetch: {NO_TOKEN}")
             raise GitError(f"git fetch: {err.strip()}")
         return bool(self.run("remote_ref").stdout.strip())
 
@@ -596,7 +606,7 @@ class Syncer:
             err = proc.stderr.decode(errors="replace").strip()
             if "rejected" not in err and "fetch first" not in err:
                 result.offline = True
-                result.error = f"git push: {err}"
+                result.error = f"git push: {NO_TOKEN if QUIT_HINT_ON in err else err}"
                 return
         result.error = "push rejected twice, try Sync now"
 
@@ -610,8 +620,10 @@ class Syncer:
         host = url.hostname + (f":{url.port}" if url.port else "")
         user = self.settings["username"] or "git"
         payload = f"protocol=https\nhost={host}\nusername={user}\npassword={token}\n\n"
-        self.prepare()
-        self.run("credential", stdin=payload.encode())
+        # prepare() rewrites the config a running sync reads between fetch and push.
+        with self.lock:
+            self.prepare()
+            self.run("credential", stdin=payload.encode())
 
 
 # Orca host glue

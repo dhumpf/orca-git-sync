@@ -85,7 +85,8 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(self.git_config("--get", "user.name"), ['A "quoted" \\ name'])
         self.assertEqual(self.git_config("--get", "remote.origin.push"), ["HEAD:refs/heads/presets"])
         self.assertEqual(
-            self.git_config("--local", "--get-all", "credential.helper"), ["", self.ogs.credential_helper()]
+            self.git_config("--local", "--get-all", "credential.helper"),
+            ["", self.ogs.credential_helper(), self.ogs.QUIT_HELPER],
         )
         self.assertEqual(self.git_config("--get", "credential.interactive"), ["false"])
         self.assertEqual(self.git_config("--get", "http.followRedirects"), ["false"])

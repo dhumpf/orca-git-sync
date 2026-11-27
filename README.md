@@ -68,7 +68,7 @@ Preset folder auto: Orca keeps presets in `user/<account id>` when you are signe
 
 Each call has a fixed command line, so Orca can grant each one once. Repo URL, branch, author and the switches below are written to the clone's own config file in the plugin's storage folder before each sync, text goes through stdin. Git runs in the `git-<folder>-run` folder next to the clone, whose `.git` file points at it.
 
-The plugin reads no environment variables and passes git no environment of its own, so git starts with Orca's environment unchanged. A `GIT_*` variable set there, for example `GIT_DIR` or `GIT_CONFIG_COUNT`, reaches git and can override the clone's config. Orca started from the Dock or Start menu has none of these. Git runs without a terminal, so it never waits on a password prompt.
+The plugin reads no environment variables and passes git no environment of its own, so git starts with Orca's environment unchanged. A `GIT_*` variable set there, for example `GIT_DIR` or `GIT_CONFIG_COUNT`, reaches git and can override the clone's config. Orca started from the Dock or Start menu has none of these. Git runs without a terminal. For an https repo URL, the clone's last credential helper stops git when the credential store has no token, so git never waits on a password prompt or runs an askpass program. An ssh repo URL logs in through ssh itself, with your keys and ssh agent. If a key needs a passphrase and none is loaded, ssh may open the askpass program set in Orca's environment.
 
 | Call | Used for |
 |---|---|
