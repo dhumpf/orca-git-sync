@@ -5,7 +5,7 @@
 # name = "Git Sync"
 # description = "Sync user presets (printer, filament, process) through a git repo."
 # author = "Daniel Humpf"
-# version = "0.3.2"
+# version = "0.4.0"
 # ///
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Sync OrcaSlicer user presets through git. Pull on start, commit and push on save.
@@ -16,8 +16,6 @@ The header above is the PEP 723 block the plugin host parses (allow-long-comment
 import datetime
 import json
 import os
-import platform
-import shutil
 import subprocess
 import sys
 import threading
@@ -27,7 +25,7 @@ from pathlib import Path
 
 import orca
 
-VERSION = "0.3.2"
+VERSION = "0.4.0"
 PRESET_DIRS = ("filament", "process", "machine")
 TRACK_REF = "refs/ogs/remote"
 GIT_TIMEOUT = 60
@@ -51,9 +49,9 @@ SPARSE = "".join(f"/{d}/*.json\n!/{d}/*/\n" for d in PRESET_DIRS)
 ASIDE = ".ogs-aside"
 
 # Fixed argv per call, so the host grants each one once. URL, branch and
-# identity travel in env (GIT_CONFIG_*), text goes on stdin.
+# identity live in the clone's own config file, text goes on stdin.
 GIT_ARGS = {
-    "init": ["init", "-q"],
+    "init": ["init", "-q", "--bare"],
     "add": ["add", "-A", "--pathspec-from-file=-", "--pathspec-file-nul"],
     "status": ["status", "--porcelain", "-z", "--untracked-files=all"],
     "commit": ["commit", "-q", "-F", "-"],
@@ -76,6 +74,17 @@ LINE_BYTES = 1024
 REDIRECT_HINT_ON = "returned error: 30"
 REDIRECT_HINT = "The repo URL redirects. Set the final URL (often ending in .git) in the plugin config"
 
+# The plugin owns the clone's config from this line on and rewrites it before each sync.
+MANAGED = "# orca-git-sync: settings below are rewritten on every sync\n"
+GIT_MISSING = "git was not found. Install git (or Xcode Command Line Tools on macOS) and restart OrcaSlicer"
+# What the macOS /usr/bin/git stub prints without the command line tools.
+XCRUN_MISSING = b"xcrun: error: invalid active developer path"
+QUIT_HELPER = "!f() { echo quit=1; }; f"
+QUIT_HINT_ON = "told us to quit"
+NO_TOKEN = "no saved token for this repo, save one in the Git Sync window"
+AUTHOR = "OrcaSlicer"
+AUTHOR_EMAIL = "orca-git-sync@localhost"
+
 DEFAULT_CONFIG = {
     "repo_url": "",
     "branch": "main",
@@ -95,28 +104,15 @@ LIBSECRET = (
     "/usr/libexec/git-core/git-credential-libsecret",
     "/usr/lib/git/git-credential-libsecret",
 )
-# All git and the credential helpers need. The rest of the user's environment, API keys
-# included, never reaches git.
-GIT_ENV_ALLOWLIST = (
-    "PATH",
-    "HOME",
-    "LANG",
-    "TMPDIR",
-    "SYSTEMROOT",
-    "USERPROFILE",
-    "APPDATA",
-    "LOCALAPPDATA",
-    "DBUS_SESSION_BUS_ADDRESS",
-    "XDG_RUNTIME_DIR",
-)
 
 
-def find_git(system=None, exists=os.path.exists, which=shutil.which):
+def find_git(system=None, exists=os.path.exists):
     system = system or sys.platform
     for candidate in GIT_CANDIDATES.get(system, ("/usr/bin/git", "/usr/local/bin/git")):
         if exists(candidate):
             return candidate
-    return which("git") or "git"
+    # The OS looks it up on the path when the process starts.
+    return "git"
 
 
 def credential_helper(system=None, exists=os.path.exists):
@@ -152,6 +148,26 @@ def commit_message(title, lines):
             return out + f"- and {len(lines) - i} more\n".encode()
         out += item
     return out
+
+
+def config_value(text):
+    """A git config value in double quotes, so no character in it is read as syntax."""
+    for a, b in (("\\", "\\\\"), ('"', '\\"'), ("\n", "\\n"), ("\t", "\\t")):
+        text = text.replace(a, b)
+    return f'"{text}"'
+
+
+def render_config(entries):
+    """Git config text for (section.key or section.sub.key, value) pairs, in order."""
+    out, current = [], None
+    for key, value in entries:
+        section, _, name = key.rpartition(".")
+        head, _, sub = section.partition(".")
+        if section != current:
+            out.append(f"[{head} {config_value(sub)}]" if sub else f"[{head}]")
+            current = section
+        out.append(f"\t{name} = {config_value(value)}")
+    return "\n".join(out) + "\n"
 
 
 def git_argv(git, name):
@@ -201,52 +217,70 @@ class Syncer:
     lock = threading.Lock()
     run_lock = threading.Lock()
 
-    def __init__(self, work_tree, git_dir, settings, git=None, host=None, hooks_dir=None):
+    def __init__(self, work_tree, git_dir, settings, git=None, hooks_dir=None):
         self.work_tree = Path(work_tree)
         self.git_dir = Path(git_dir)
         self.settings = {**DEFAULT_CONFIG, **(settings or {})}
         self.git = git or find_git()
-        self.host = host or platform.node().split(".")[0] or "orca"
         self.hooks_dir = Path(hooks_dir) if hooks_dir else self.git_dir.parent / "no-hooks"
+        # git runs here. A .git file points at the clone, so git finds it without env or argv.
+        self.run_dir = self.git_dir.with_name(self.git_dir.name + "-run")
         self.skipped = []
 
-    def env(self):
+    def config(self):
         branch = self.settings["branch"] or "main"
         # An empty credential.helper clears helpers inherited from the user's git config.
-        config = [
+        return [
+            ("core.bare", "false"),
+            ("core.worktree", str(self.work_tree)),
+            ("core.hooksPath", str(self.hooks_dir)),
+            ("core.sparseCheckout", "true"),
+            ("core.sparseCheckoutCone", "false"),
+            ("core.symlinks", "false"),
+            ("core.quotePath", "false"),
+            ("sparse.expectFilesOutsideOfPatterns", "true"),
             ("remote.origin.url", self.settings["repo_url"]),
             ("remote.origin.fetch", f"+refs/heads/{branch}:{TRACK_REF}"),
             ("remote.origin.push", f"HEAD:refs/heads/{branch}"),
             ("credential.helper", ""),
             ("credential.helper", credential_helper()),
+            # Last helper: stop here when the store has no token. Git before 2.47 ignores
+            # credential.interactive and would run an inherited askpass program.
+            ("credential.helper", QUIT_HELPER),
+            ("credential.interactive", "false"),
             ("http.followRedirects", "false"),
-            ("core.hooksPath", str(self.hooks_dir)),
-            ("core.sparseCheckout", "true"),
-            ("core.sparseCheckoutCone", "false"),
-            ("sparse.expectFilesOutsideOfPatterns", "true"),
-            ("core.symlinks", "false"),
             ("commit.gpgSign", "false"),
-            ("core.quotePath", "false"),
             ("merge.renames", "false"),
             ("status.renames", "false"),
+            ("user.name", self.settings["author_name"] or AUTHOR),
+            ("user.email", self.settings["author_email"] or AUTHOR_EMAIL),
         ]
-        env = {k: os.environ[k] for k in GIT_ENV_ALLOWLIST if k in os.environ}
-        name = self.settings["author_name"] or f"OrcaSlicer on {self.host}"
-        email = self.settings["author_email"] or "orca-git-sync@localhost"
-        env.update(
-            GIT_DIR=str(self.git_dir),
-            GIT_WORK_TREE=str(self.work_tree),
-            GIT_TERMINAL_PROMPT="0",
-            GIT_AUTHOR_NAME=name,
-            GIT_AUTHOR_EMAIL=email,
-            GIT_COMMITTER_NAME=name,
-            GIT_COMMITTER_EMAIL=email,
-            GIT_CONFIG_COUNT=str(len(config)),
-        )
-        for i, (key, value) in enumerate(config):
-            env[f"GIT_CONFIG_KEY_{i}"] = key
-            env[f"GIT_CONFIG_VALUE_{i}"] = value
-        return env
+
+    def write_config(self):
+        """Replace the plugin's part of the clone's config. What git init wrote above it stays."""
+        path = self.git_dir / "config"
+        old = path.read_text(encoding="utf-8") if path.exists() else ""
+        head = old.split(MANAGED, 1)[0]
+        if head and not head.endswith("\n"):
+            head += "\n"
+        self.replace_text(path, head + MANAGED + render_config(self.config()))
+        self.run_dir.mkdir(parents=True, exist_ok=True)
+        self.replace_text(self.run_dir / ".git", f"gitdir: {self.git_dir}\n")
+
+    @staticmethod
+    def replace_text(path, text):
+        if path.exists() and path.read_text(encoding="utf-8") == text:
+            return
+        tmp = path.with_name(path.name + ".ogs-tmp")
+        tmp.write_text(text, encoding="utf-8")
+        os.replace(tmp, path)
+
+    def prepare(self):
+        """Create the clone if needed and write its config. Needs no preset folder."""
+        if not (self.git_dir / "HEAD").exists():
+            self.git_dir.mkdir(parents=True, exist_ok=True)
+            self.run("init")
+        self.write_config()
 
     def run(self, name, stdin=None, check=True):
         # The host denies open() on a bare fd, which subprocess pipes use. Output goes to
@@ -264,21 +298,30 @@ class Syncer:
                 os.write(write_fd, data)
                 os.close(write_fd)
                 write_fd = None
+                # A new session has no terminal, so git cannot stop on a password prompt.
+                cwd = str(self.git_dir if name == "init" else self.run_dir)
                 with open(out_path, "wb") as out, open(err_path, "wb") as err:
                     code = subprocess.run(
                         argv,
                         stdin=read_fd,
                         stdout=out,
                         stderr=err,
-                        cwd=str(self.work_tree),
-                        env=self.env(),
+                        cwd=cwd,
                         timeout=GIT_TIMEOUT,
+                        start_new_session=True,
                     ).returncode
+            except FileNotFoundError as e:
+                # Windows leaves filename empty, so a folder that is there means git is not.
+                if e.filename != argv[0] and not (e.filename is None and os.path.isdir(cwd)):
+                    raise
+                raise GitError(GIT_MISSING) from None
             finally:
                 os.close(read_fd)
                 if write_fd is not None:
                     os.close(write_fd)
             proc = subprocess.CompletedProcess(argv, code, out_path.read_bytes(), err_path.read_bytes())
+        if proc.returncode != 0 and XCRUN_MISSING in proc.stderr:
+            raise GitError(GIT_MISSING)
         if check and proc.returncode != 0:
             raise GitError(f"git {name}: {proc.stderr.decode(errors='replace').strip()}")
         return proc
@@ -286,9 +329,7 @@ class Syncer:
     def ensure_repo(self):
         if not self.work_tree.is_dir():
             raise GitError(f"preset folder {self.work_tree} does not exist")
-        if not (self.git_dir / "HEAD").exists():
-            self.git_dir.mkdir(parents=True, exist_ok=True)
-            self.run("init")
+        self.prepare()
         self.hooks_dir.mkdir(parents=True, exist_ok=True)
         exclude = self.git_dir / "info" / "exclude"
         exclude.parent.mkdir(parents=True, exist_ok=True)
@@ -336,7 +377,7 @@ class Syncer:
         self.stage()
         changed = self.changes()
         if changed:
-            title = f"presets: {len(changed)} change(s) on {self.host}"
+            title = f"presets: {len(changed)} change(s)"
             self.run("commit", stdin=commit_message(title, [f"- {p}" for p in sorted(changed)]))
         return changed
 
@@ -349,6 +390,8 @@ class Syncer:
                 return False
             if REDIRECT_HINT_ON in err:
                 raise GitError(f"git fetch: {err.strip()}. {REDIRECT_HINT}")
+            if QUIT_HINT_ON in err:
+                raise GitError(f"git fetch: {NO_TOKEN}")
             raise GitError(f"git fetch: {err.strip()}")
         return bool(self.run("remote_ref").stdout.strip())
 
@@ -563,7 +606,7 @@ class Syncer:
             err = proc.stderr.decode(errors="replace").strip()
             if "rejected" not in err and "fetch first" not in err:
                 result.offline = True
-                result.error = f"git push: {err}"
+                result.error = f"git push: {NO_TOKEN if QUIT_HINT_ON in err else err}"
                 return
         result.error = "push rejected twice, try Sync now"
 
@@ -577,7 +620,10 @@ class Syncer:
         host = url.hostname + (f":{url.port}" if url.port else "")
         user = self.settings["username"] or "git"
         payload = f"protocol=https\nhost={host}\nusername={user}\npassword={token}\n\n"
-        self.run("credential", stdin=payload.encode())
+        # prepare() rewrites the config a running sync reads between fetch and push.
+        with self.lock:
+            self.prepare()
+            self.run("credential", stdin=payload.encode())
 
 
 # Orca host glue
@@ -634,7 +680,7 @@ small { color: GrayText; }
 <label><span>Repo URL</span><input name="repo_url" placeholder="https://git.example.com/team/presets.git"></label>
 <label><span>Branch</span><input name="branch" placeholder="main"></label>
 <label><span>Username</span><input name="username"><small>The token goes to the system credential store from the Git Sync window, never into this config.</small></label>
-<label><span>Commit author name</span><input name="author_name" placeholder="OrcaSlicer on this computer"></label>
+<label><span>Commit author name</span><input name="author_name" placeholder="OrcaSlicer"></label>
 <label><span>Commit author email</span><input name="author_email"></label>
 <label><span>Preset folder</span><input name="preset_folder" placeholder="auto"><small>Folder name under user/. Empty picks the one Orca loads.</small></label>
 <button type="submit">Save</button>

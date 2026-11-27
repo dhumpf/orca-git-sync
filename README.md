@@ -29,10 +29,9 @@ Orca's plugin review lists what a plugin can touch. This is what Git Sync does w
 | What | Why | How to limit or change it |
 |---|---|---|
 | Runs git as a separate process, only the fixed commands under [Git calls](#git-calls). Each call stops after 60 s | all the sync work is git. It is looked up in the usual install places (Homebrew or Xcode on macOS, Git for Windows) and otherwise on your `PATH` | Orca asks once to allow these commands. Without that the plugin cannot sync |
-| Reads a short list of environment variables and hands only those to git | git and the credential helpers need them, see [Git calls](#git-calls). Nothing else from your shell is passed on | nothing to set. Git still reads your own global git config through `HOME`, except hooks, commit signing, credential helpers, HTTP redirects and links, which are switched off for these calls |
-| Reads the computer name (the part before the first dot) | the default commit author is `OrcaSlicer on <name>`, and a commit of your saved presets reads `presets: N change(s) on <name>`, so you can tell which computer saved what. A merge commit has git's own subject or `presets: merge, kept both versions` | set Commit author name and email in the config. The name in the commit subject stays. Both go into the repo history |
+| Environment variables and the computer name | the plugin reads neither. Git starts with Orca's own environment as it is, like any program Orca starts | nothing to set. Git still reads your own global git config, except hooks, commit signing, credential helpers, HTTP redirects and links, which the clone's config switches off. A `GIT_*` variable set in Orca's environment does reach git, see [Git calls](#git-calls) |
 | Reads and writes your Orca preset folder | commits only `*.json` directly inside `filament/`, `process/` and `machine/`. A pull writes, updates or deletes only those files, plus a `(git conflict ...)` copy when both sides changed a preset. A link in the repo arrives as a plain file, and a folder named like a preset is not checked out. Links and folders in the preset folder are never read or committed as presets. Any other file in the repo stays in git and is not written to the folder. When a merge conflicts on such a file, the repo's version wins in git. Such files an older version wrote there are removed on the next pull that brings changes, unless you edited them. An edited one stays, and while a pull runs it is renamed to `<name>.ogs-aside` and put back right after, so git does not stop on it. See the exceptions below the table | pick the folder with Preset folder. Give push access to the repo only to people you trust |
-| Writes its own storage folder | the git repo, the last git output and `sync.log` (one line per sync) live here, so no `.git` folder ends up among your presets | nothing to set. `sync.log` holds the sync summaries and git error messages, no token |
+| Writes its own storage folder | the git repo with its config, a `git-<folder>-run` folder git starts in, the last git output and `sync.log` (one line per sync) live here, so no `.git` folder ends up among your presets | nothing to set. `sync.log` holds the sync summaries and git error messages, no token. The plugin never writes your global git config |
 | Talks to the repo URL you set | fetch and push through git, on start, 2 s after a save, on Sync now and on quit. HTTP redirects are not followed, so git never goes on to another address. The plugin makes no other network call | the repo URL in the config. If it redirects, sync stops with a message to set the final URL. A proxy or `insteadOf` rule in your global git config still applies |
 | Saves the token to the system credential store | the token field goes to `git credential approve` on stdin. macOS keychain, Windows Credential Manager, or libsecret on Linux. Credential helpers from your own git config are cleared for every plugin git call, so only that store gets the token. The plugin does not write it to its config, `sync.log` or any other file | use a token that can only read and write the presets repo. Revoke it at your git host, or delete it from the keychain or Credential Manager. Linux without libsecret keeps it in git's memory cache, for up to 30 days or until you log out |
 | Starts background threads | the sync runs beside Orca so saving a preset does not freeze it | Orca asks once together with the git commands |
@@ -67,13 +66,13 @@ Preset folder auto: Orca keeps presets in `user/<account id>` when you are signe
 
 ## Git calls
 
-Each call has a fixed command line, so Orca can grant each one once. Repo URL, branch and author go in through `GIT_CONFIG_*` environment variables, text through stdin.
+Each call has a fixed command line, so Orca can grant each one once. Repo URL, branch, author and the switches below are written to the clone's own config file in the plugin's storage folder before each sync, text goes through stdin. Git runs in the `git-<folder>-run` folder next to the clone, whose `.git` file points at it.
 
-Git gets a short allowlist from your environment, nothing else: `PATH`, `HOME`, `LANG`, `TMPDIR`, plus what the credential helpers need on Windows (`SYSTEMROOT`, `USERPROFILE`, `APPDATA`, `LOCALAPPDATA`) and Linux (`DBUS_SESSION_BUS_ADDRESS`, `XDG_RUNTIME_DIR`). API keys and tokens in your shell never reach git. That read is why Orca's plugin review lists "Reads environment variables".
+The plugin reads no environment variables and passes git no environment of its own, so git starts with Orca's environment unchanged. A `GIT_*` variable set there, for example `GIT_DIR` or `GIT_CONFIG_COUNT`, reaches git and can override the clone's config. Orca started from the Dock or Start menu has none of these. Git runs without a terminal. For an https repo URL, the clone's last credential helper stops git when the credential store has no token, so git never waits on a password prompt or runs an askpass program. An ssh repo URL logs in through ssh itself, with your keys and ssh agent. If a key needs a passphrase and none is loaded, ssh may open the askpass program set in Orca's environment.
 
 | Call | Used for |
 |---|---|
-| `init -q` | first run |
+| `init -q --bare` | first run, in the new clone folder. The plugin then writes its config |
 | `status --porcelain -z --untracked-files=all`, `add -A --pathspec-from-file=- --pathspec-file-nul`, `commit -q -F -` | local commits. The plugin picks the preset paths from `status` and stages only those, by name on stdin |
 | `rev-parse -q --verify HEAD` | is there history yet |
 | `fetch -q origin`, `for-each-ref ... refs/ogs/remote` | pull |
@@ -82,7 +81,7 @@ Git gets a short allowlist from your environment, nothing else: `PATH`, `HOME`, 
 | `push -q origin` | push, never forced |
 | `credential approve` | save the token to the credential store |
 
-Your global git hooks, commit signing, credential helpers and HTTP redirects are switched off for these calls, and links are checked out as plain files. A pull uses a sparse checkout, so only the preset json lands in the preset folder. The exceptions are an empty folder for a submodule named like a preset, and a file you named `*.ogs-aside`, which is renamed back. Both are listed under [What this plugin accesses](#what-this-plugin-accesses).
+Your global git hooks, commit signing, credential helpers and HTTP redirects are switched off for these calls by the clone's config, and links are checked out as plain files. A pull uses a sparse checkout, so only the preset json lands in the preset folder. The exceptions are an empty folder for a submodule named like a preset, and a file you named `*.ogs-aside`, which is renamed back. Both are listed under [What this plugin accesses](#what-this-plugin-accesses).
 
 ## Limits
 
@@ -100,7 +99,7 @@ Your global git hooks, commit signing, credential helpers and HTTP redirects are
 
 ## Develop
 
-`make` lists the targets. `make setup && make test` runs the unit tests and a two-computer simulation against a bare repo, without Orca. `make lint`, `make build`.
+`make` lists the targets. `make setup && make test` runs the unit tests and a two-computer simulation against a bare repo, without Orca. `make lint`, `make build`. `make ci` is what CI runs.
 
 ## Release
 

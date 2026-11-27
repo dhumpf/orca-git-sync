@@ -215,12 +215,12 @@ class PluginTest(unittest.TestCase):
             return lambda p: p == want
 
         mac = "/opt/homebrew/bin/git"
-        self.assertEqual(ogs.find_git("darwin", only(mac), lambda n: None), mac)
+        self.assertEqual(ogs.find_git("darwin", only(mac)), mac)
         win = r"C:\Program Files\Git\cmd\git.exe"
-        self.assertEqual(ogs.find_git("win32", only(win), lambda n: None), win)
-        self.assertEqual(ogs.find_git("linux", only("/usr/bin/git"), lambda n: None), "/usr/bin/git")
-        self.assertEqual(ogs.find_git("linux", lambda p: False, lambda n: "/x/bin/git"), "/x/bin/git")
-        self.assertEqual(ogs.find_git("win32", lambda p: False, lambda n: None), "git")
+        self.assertEqual(ogs.find_git("win32", only(win)), win)
+        self.assertEqual(ogs.find_git("linux", only("/usr/bin/git")), "/usr/bin/git")
+        self.assertEqual(ogs.find_git("linux", lambda p: False), "git")
+        self.assertEqual(ogs.find_git("win32", lambda p: False), "git")
 
     def test_messages_have_no_semicolons_or_em_dashes(self):
         _, ogs = load_plugin(self.tmp.name)

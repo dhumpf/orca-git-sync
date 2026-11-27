@@ -48,7 +48,6 @@ class Mac:
             storage / "git",
             {"repo_url": str(remote)},
             git="git",
-            host=label,
         )
 
     def save(self, kind, name, **values):

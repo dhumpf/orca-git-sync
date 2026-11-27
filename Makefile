@@ -33,6 +33,12 @@ lint: ## Ruff, plus no em dashes or semicolons in prose
 	@grep -n $$'\xe2\x80\x94' README.md CHANGELOG.md orca_git_sync.py tests/*.py ; test $$? -eq 1
 	@grep -n ';' README.md CHANGELOG.md ; test $$? -eq 1
 
+.PHONY: ci
+ci: setup ## What CI runs: setup, then lint, test, release build in order
+	$(MAKE) lint
+	$(MAKE) test
+	$(MAKE) release
+
 .PHONY: fmt
 fmt: ## Rewrite files with ruff format
 	$(VENV)/bin/ruff format .
@@ -43,7 +49,7 @@ build: ## Build dist/ with the installable .py and a release zip
 	cp orca_git_sync.py $(DIST)/
 	cp orca_git_sync.py $(DIST)/orca_git_sync_any.py
 	rm -f $(DIST)/orca-git-sync-$(VERSION).zip
-	zip -q -j $(DIST)/orca-git-sync-$(VERSION).zip orca_git_sync.py README.md LICENSE
+	$(PYTHON) scripts/zip.py $(DIST)/orca-git-sync-$(VERSION).zip orca_git_sync.py README.md LICENSE
 	@echo "install $(DIST)/orca_git_sync.py from Orca > Plugins > Install local plugin"
 
 ##@ Release
