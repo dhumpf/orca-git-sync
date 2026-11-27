@@ -34,7 +34,7 @@ lint: ## Ruff, plus no em dashes or semicolons in prose
 	@grep -n ';' README.md CHANGELOG.md ; test $$? -eq 1
 
 .PHONY: ci
-ci: setup ## What CI runs on GitHub and Forgejo: setup, then lint, test, release build in order
+ci: setup ## What CI runs: setup, then lint, test, release build in order
 	$(MAKE) lint
 	$(MAKE) test
 	$(MAKE) release

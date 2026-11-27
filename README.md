@@ -99,7 +99,7 @@ Your global git hooks, commit signing, credential helpers and HTTP redirects are
 
 ## Develop
 
-`make` lists the targets. `make setup && make test` runs the unit tests and a two-computer simulation against a bare repo, without Orca. `make lint`, `make build`. `make ci` is what CI runs, on GitHub and on Forgejo.
+`make` lists the targets. `make setup && make test` runs the unit tests and a two-computer simulation against a bare repo, without Orca. `make lint`, `make build`. `make ci` is what CI runs.
 
 ## Release
 
