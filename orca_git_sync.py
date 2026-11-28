@@ -833,20 +833,22 @@ class GitSync(orca.script.ScriptPluginCapabilityBase):
                     self.gate.wait_for(lambda: not self.running, timeout=wait)
                 return None
             GitSync.running = True
-        result = None
         try:
             while True:
                 result = self.sync_once(startup, wait)
                 with self.gate:
-                    if not GitSync.rerun or result.busy:
-                        GitSync.rerun = False
-                        break
+                    # Read rerun and go idle in one gate block, or a trigger in between is lost.
+                    again = GitSync.rerun and not result.busy
                     GitSync.rerun = False
-        finally:
+                    if not again:
+                        GitSync.running = False
+                        self.gate.notify_all()
+                        return result
+        except BaseException:
             with self.gate:
                 GitSync.running = False
                 self.gate.notify_all()
-        return result
+            raise
 
     def sync_once(self, startup, wait):
         lock = None

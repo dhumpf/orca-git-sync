@@ -65,6 +65,38 @@ class ConcurrencyTest(unittest.TestCase):
         self.assertEqual(self.calls, 1)
         self.assertFalse(self.ogs.GitSync.running)
 
+    def test_a_trigger_as_the_sync_ends_still_gets_a_pass(self):
+        test, triggered = self, []
+
+        class Gate(threading.Condition):
+            def __exit__(self, *exc):
+                super().__exit__(*exc)
+                # The first time the gate frees after the sync ran, a trigger takes it, as another thread could.
+                if test.calls and not triggered:
+                    triggered.append(True)
+                    test.cap.run_sync()
+
+        self.ogs.GitSync.gate = Gate()
+        self.release.set()
+        self.cap.run_sync()
+        self.assertTrue(triggered, "the trigger never ran")
+        self.assertEqual(self.calls, 2, "a trigger accepted as the sync ended got no pass")
+        self.assertFalse(self.ogs.GitSync.running)
+        self.assertFalse(self.ogs.GitSync.rerun)
+
+    def test_a_failed_pass_leaves_it_idle(self):
+        def boom(*args):
+            raise RuntimeError("boom")
+
+        self.cap.sync_once = boom
+        with self.assertRaises(RuntimeError):
+            self.cap.run_sync()
+        self.assertFalse(self.ogs.GitSync.running)
+        del self.cap.sync_once
+        self.release.set()
+        self.cap.run_sync()
+        self.assertEqual(self.calls, 1)
+
     def test_unload_waits_for_the_running_sync(self):
         t = self.start_first()
         u = threading.Thread(target=self.cap.on_unload, daemon=True)
@@ -78,6 +110,7 @@ class ConcurrencyTest(unittest.TestCase):
         self.assertEqual(self.calls, 2, "unload did not get a final pass")
         self.assertIn("up to date", self.cap.last)
 
+    @unittest.skipIf(sys.platform == "win32", "the lock holder uses fcntl")
     def test_second_process_skips_with_a_clear_status(self):
         code = (
             "import fcntl,sys,time\n"
