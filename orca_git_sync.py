@@ -5,7 +5,7 @@
 # name = "Git Sync"
 # description = "Sync user presets (printer, filament, process) through a git repo."
 # author = "Daniel Humpf"
-# version = "0.4.0"
+# version = "0.4.1"
 # ///
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Sync OrcaSlicer user presets through git. Pull on start, commit and push on save.
@@ -19,17 +19,20 @@ import os
 import subprocess
 import sys
 import threading
+import time
 import urllib.parse
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import orca
 
-VERSION = "0.4.0"
+VERSION = "0.4.1"
 PRESET_DIRS = ("filament", "process", "machine")
 TRACK_REF = "refs/ogs/remote"
 GIT_TIMEOUT = 60
 DEBOUNCE_S = 2.0
+UNLOAD_WAIT_S = 90
+LOCK_POLL_S = 0.1
 
 # Only preset json is tracked. A .info holds per-account cloud ids, and a
 # lone .info reads to Orca as a cloud delete request.
@@ -49,9 +52,11 @@ SPARSE = "".join(f"/{d}/*.json\n!/{d}/*/\n" for d in PRESET_DIRS)
 ASIDE = ".ogs-aside"
 
 # Fixed argv per call, so the host grants each one once. URL, branch and
-# identity live in the clone's own config file, text goes on stdin.
+# identity live in the clone's config.worktree, text goes on stdin.
 GIT_ARGS = {
     "init": ["init", "-q", "--bare"],
+    "drop_remote": ["config", "--remove-section", "remote.origin"],
+    "worktree_config": ["config", "extensions.worktreeConfig", "true"],
     "add": ["add", "-A", "--pathspec-from-file=-", "--pathspec-file-nul"],
     "status": ["status", "--porcelain", "-z", "--untracked-files=all"],
     "commit": ["commit", "-q", "-F", "-"],
@@ -74,8 +79,12 @@ LINE_BYTES = 1024
 REDIRECT_HINT_ON = "returned error: 30"
 REDIRECT_HINT = "The repo URL redirects. Set the final URL (often ending in .git) in the plugin config"
 
-# The plugin owns the clone's config from this line on and rewrites it before each sync.
-MANAGED = "# orca-git-sync: settings below are rewritten on every sync\n"
+# Orca refuses Python any path with a component named config, so settings go to config.worktree.
+# Git reads it after config once extensions.worktreeConfig is on, core.worktree included.
+SETTINGS_FILE = "config.worktree"
+SETTINGS_HEAD = "# orca-git-sync: rewritten before every sync\n"
+# git config --remove-section exits 128 when the section is not there.
+NO_SECTION_EXIT = 128
 GIT_MISSING = "git was not found. Install git (or Xcode Command Line Tools on macOS) and restart OrcaSlicer"
 # What the macOS /usr/bin/git stub prints without the command line tools.
 XCRUN_MISSING = b"xcrun: error: invalid active developer path"
@@ -189,6 +198,7 @@ class SyncResult:
     pulled: list = field(default_factory=list)
     conflicts: list = field(default_factory=list)
     pushed: bool = False
+    busy: bool = False
     offline: bool = False
     error: str = ""
     skipped: list = field(default_factory=list)
@@ -196,6 +206,8 @@ class SyncResult:
     def summary(self):
         if self.error:
             return f"Git Sync failed: {self.error}"
+        if self.busy:
+            return "Git Sync skipped: another Orca is syncing this clone"
         parts = []
         if self.committed:
             parts.append(f"committed {len(self.committed)}")
@@ -208,6 +220,59 @@ class SyncResult:
         if self.skipped:
             parts.append(f"skipped {len(self.skipped)} link(s) or folder(s) named like a preset")
         return "Git Sync: " + (", ".join(parts) if parts else "up to date")
+
+
+class FileLock:
+    """Advisory lock on a file in plugin storage, so two Orca instances never sync one clone together."""
+
+    def __init__(self, path):
+        self.path = Path(path)
+        self.handle = None
+
+    @staticmethod
+    def _try(handle):
+        try:
+            if sys.platform == "win32":
+                import msvcrt
+
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except ImportError:
+            return True
+        except OSError:
+            return False
+        return True
+
+    def acquire(self, wait=0.0):
+        """True when held. False when another process holds it past the wait."""
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        handle = open(self.path, "a+")
+        end = time.monotonic() + wait
+        while not self._try(handle):
+            if time.monotonic() >= end:
+                handle.close()
+                return False
+            time.sleep(LOCK_POLL_S)
+        self.handle = handle
+        return True
+
+    def release(self):
+        if self.handle is None:
+            return
+        handle, self.handle = self.handle, None
+        try:
+            if sys.platform == "win32":
+                import msvcrt
+
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        except (ImportError, OSError):
+            pass
+        handle.close()
 
 
 class Syncer:
@@ -257,15 +322,17 @@ class Syncer:
         ]
 
     def write_config(self):
-        """Replace the plugin's part of the clone's config. What git init wrote above it stays."""
-        path = self.git_dir / "config"
-        old = path.read_text(encoding="utf-8") if path.exists() else ""
-        head = old.split(MANAGED, 1)[0]
-        if head and not head.endswith("\n"):
-            head += "\n"
-        self.replace_text(path, head + MANAGED + render_config(self.config()))
+        """Write the plugin's settings to config.worktree. Only git itself writes the clone's config."""
         self.run_dir.mkdir(parents=True, exist_ok=True)
         self.replace_text(self.run_dir / ".git", f"gitdir: {self.git_dir}\n")
+        path = self.git_dir / SETTINGS_FILE
+        if not path.exists():
+            # 0.4.0 wrote remote.origin into config, where its url, fetch and push would add to ours.
+            drop = self.run("drop_remote", check=False)
+            if drop.returncode not in (0, NO_SECTION_EXIT):
+                raise GitError(f"git config: {drop.stderr.decode(errors='replace').strip()}")
+            self.run("worktree_config")
+        self.replace_text(path, SETTINGS_HEAD + render_config(self.config()))
 
     @staticmethod
     def replace_text(path, text):
@@ -721,6 +788,10 @@ class GitSync(orca.script.ScriptPluginCapabilityBase):
     pending = None
     storage_dir = None
     last = "Not synced yet."
+    # One sync at a time. A trigger during a sync sets rerun and the running sync loops once more.
+    gate = threading.Condition()
+    running = False
+    rerun = False
 
     def get_name(self):
         return "Git Sync"
@@ -753,11 +824,46 @@ class GitSync(orca.script.ScriptPluginCapabilityBase):
         work = preset_folder(data_dir(), cfg["preset_folder"])
         return Syncer(work, storage / f"git-{work.name}", cfg, hooks_dir=storage / "no-hooks")
 
-    def run_sync(self, startup=False):
+    def run_sync(self, startup=False, wait=0.0):
+        """Sync now, or ask the running sync to go once more. wait: seconds to wait for it."""
+        with self.gate:
+            if self.running:
+                GitSync.rerun = True
+                if wait:
+                    self.gate.wait_for(lambda: not self.running, timeout=wait)
+                return None
+            GitSync.running = True
         try:
-            result = self.make_syncer().sync()
+            while True:
+                result = self.sync_once(startup, wait)
+                with self.gate:
+                    # Read rerun and go idle in one gate block, or a trigger in between is lost.
+                    again = GitSync.rerun and not result.busy
+                    GitSync.rerun = False
+                    if not again:
+                        GitSync.running = False
+                        self.gate.notify_all()
+                        return result
+        except BaseException:
+            with self.gate:
+                GitSync.running = False
+                self.gate.notify_all()
+            raise
+
+    def sync_once(self, startup, wait):
+        lock = None
+        try:
+            storage = self.storage_dir or Path(orca.host.plugin.storage())
+            lock = FileLock(storage / "sync.lock")
+            if lock.acquire(wait=min(wait, 10)):
+                result = self.make_syncer().sync()
+            else:
+                result = SyncResult(busy=True)
         except Exception as e:
             result = SyncResult(error=str(e))
+        finally:
+            if lock is not None:
+                lock.release()
         self.last = result.summary()
         text = self.message(result, startup)
         self.log(text)
@@ -811,7 +917,7 @@ class GitSync(orca.script.ScriptPluginCapabilityBase):
         self.remember_storage()
         if self.timer:
             self.timer.cancel()
-        self.run_sync()
+        self.run_sync(wait=UNLOAD_WAIT_S)
 
     def on_lifecycle_event(self, event, ctx):
         # Lifecycle events come from the plater, so the UI exists now.

@@ -66,13 +66,14 @@ Preset folder auto: Orca keeps presets in `user/<account id>` when you are signe
 
 ## Git calls
 
-Each call has a fixed command line, so Orca can grant each one once. Repo URL, branch, author and the switches below are written to the clone's own config file in the plugin's storage folder before each sync, text goes through stdin. Git runs in the `git-<folder>-run` folder next to the clone, whose `.git` file points at it.
+Each call has a fixed command line, so Orca can grant each one once. Repo URL, branch, author and the switches below are written to the clone's `config.worktree` file in the plugin's storage folder before each sync, text goes through stdin. Orca does not let a plugin open any file named `config`, so only git writes the clone's `config` file, once, to switch on `extensions.worktreeConfig`. Git then reads `config.worktree` after it. Git runs in the `git-<folder>-run` folder next to the clone, whose `.git` file points at it.
 
 The plugin reads no environment variables and passes git no environment of its own, so git starts with Orca's environment unchanged. A `GIT_*` variable set there, for example `GIT_DIR` or `GIT_CONFIG_COUNT`, reaches git and can override the clone's config. Orca started from the Dock or Start menu has none of these. Git runs without a terminal. For an https repo URL, the clone's last credential helper stops git when the credential store has no token, so git never waits on a password prompt or runs an askpass program. An ssh repo URL logs in through ssh itself, with your keys and ssh agent. If a key needs a passphrase and none is loaded, ssh may open the askpass program set in Orca's environment.
 
 | Call | Used for |
 |---|---|
-| `init -q --bare` | first run, in the new clone folder. The plugin then writes its config |
+| `init -q --bare` | first run, in the new clone folder |
+| `config --remove-section remote.origin`, `config extensions.worktreeConfig true` | once per clone, before the plugin first writes `config.worktree`. The first drops the repo URL 0.4.0 wrote into `config`, so it is not listed twice. The second makes git read `config.worktree` |
 | `status --porcelain -z --untracked-files=all`, `add -A --pathspec-from-file=- --pathspec-file-nul`, `commit -q -F -` | local commits. The plugin picks the preset paths from `status` and stages only those, by name on stdin |
 | `rev-parse -q --verify HEAD` | is there history yet |
 | `fetch -q origin`, `for-each-ref ... refs/ogs/remote` | pull |

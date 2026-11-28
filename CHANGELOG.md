@@ -2,6 +2,19 @@
 
 The section for a version becomes its GitHub release notes and its Orca Cloud changelog.
 
+## 0.4.1
+
+Syncs work again in OrcaSlicer 2.5. Orca refuses a plugin any file whose path has a part named `config`, and 0.4.0 kept its settings in the clone's `config` file, so syncs failed with "denied path".
+
+| | |
+|---|---|
+| Settings | go to `config.worktree` in the clone, a file the plugin may write. Git reads it after the clone's `config` once `extensions.worktreeConfig` is on. Only git writes `config` now |
+| Upgrade | the first sync drops the `remote "origin"` section 0.4.0 wrote into `config`, so the repo URL, fetch and push are not listed twice, then switches the extension on. History and the saved token stay |
+| Permissions | `config --remove-section remote.origin` and `config extensions.worktreeConfig true` are new, so Orca asks once more to allow the git commands |
+| One at a time | a save, Sync now, startup and quit can start a sync together. Now one runs and a trigger that arrives meanwhile makes it go once more at the end, however many arrive |
+| Quit | waits for the running sync, which then makes its final pass, instead of starting a second one |
+| Two Orca windows | a lock file `sync.lock` in the plugin's storage folder keeps two Orca instances from syncing one clone at once. The second shows "another Orca is syncing this clone" and skips |
+
 ## 0.4.0
 
 The plugin reads no environment variables and no computer name.
