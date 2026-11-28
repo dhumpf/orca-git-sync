@@ -30,7 +30,7 @@ class TokenLockTest(unittest.TestCase):
             {"repo_url": "https://x.example/a.git"},
             git="git",
         )
-        config = s.git_dir / "config"
+        config = s.git_dir / self.ogs.SETTINGS_FILE
         with s.lock:
             t = threading.Thread(target=s.save_token, args=("tok",), daemon=True)
             t.start()

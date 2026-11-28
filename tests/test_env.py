@@ -1,4 +1,4 @@
-"""Git settings live in the clone's own config. The plugin reads no environment and no computer name."""
+"""Git settings live in the clone's config.worktree. The plugin reads no environment and no computer name."""
 
 import ast
 import os
@@ -85,7 +85,7 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(self.git_config("--get", "user.name"), ['A "quoted" \\ name'])
         self.assertEqual(self.git_config("--get", "remote.origin.push"), ["HEAD:refs/heads/presets"])
         self.assertEqual(
-            self.git_config("--local", "--get-all", "credential.helper"),
+            self.git_config("--worktree", "--get-all", "credential.helper"),
             ["", self.ogs.credential_helper(), self.ogs.QUIT_HELPER],
         )
         self.assertEqual(self.git_config("--get", "credential.interactive"), ["false"])
@@ -102,18 +102,21 @@ class ConfigTest(unittest.TestCase):
         ).stdout.strip()
         self.assertEqual(log, "OrcaSlicer|OrcaSlicer|presets: 1 change(s)")
 
-    def test_rewrite_keeps_what_git_init_wrote_and_replaces_only_its_own_part(self):
+    def test_settings_live_in_config_worktree_and_config_stays_as_git_wrote_it(self):
         s = self.a.syncer
         s.ensure_repo()
         cfg = s.git_dir / "config"
-        head = cfg.read_text().split(self.ogs.MANAGED)[0]
-        self.assertIn("repositoryformatversion", head)
+        before = cfg.read_text()
+        self.assertIn("repositoryformatversion", before)
+        self.assertEqual(self.git_config("--local", "--get", "extensions.worktreeConfig"), ["true"])
+        self.assertNotIn("remote", before)
         s.settings["repo_url"] = "https://git.example.com/new.git"
         s.ensure_repo()
-        text = cfg.read_text()
-        self.assertEqual(text.count(self.ogs.MANAGED), 1)
-        self.assertTrue(text.startswith(head))
-        self.assertEqual(self.git_config("--get", "remote.origin.url"), ["https://git.example.com/new.git"])
+        self.assertEqual(cfg.read_text(), before, "the plugin rewrote the clone config")
+        self.assertEqual(
+            self.git_config("--worktree", "--get", "remote.origin.url"), ["https://git.example.com/new.git"]
+        )
+        self.assertEqual(self.git_config("--get-all", "remote.origin.url"), ["https://git.example.com/new.git"])
 
     def test_a_0_3_2_clone_upgrades_in_place(self):
         # 0.3.2 made the clone with GIT_DIR and GIT_WORK_TREE and kept settings out of its config.
